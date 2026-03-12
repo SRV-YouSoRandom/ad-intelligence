@@ -125,7 +125,7 @@ class MetaFetcher:
         """
         params = {
             "search_page_ids": page_id,
-            "ad_reached_countries": json.dumps(countries),
+            "ad_reached_countries": json.dumps(countries, separators=(',', ':')),
             "ad_active_status": status,
             "fields": FIELDS_STRING,
             "limit": 100,
@@ -159,7 +159,11 @@ class MetaFetcher:
                             raise MetaAPIError(f"Authentication error: {error.get('message', 'Unknown')}")
 
                         logger.error("meta_api_error", error=error, page=page_num)
-                        break
+                        raise MetaAPIError(f"Meta API Error ({error_code}): {error.get('message', 'Unknown')}")
+
+                    # If no 'data' key and no 'error', but response was bad
+                    if response.status_code >= 400 and "data" not in data:
+                        raise MetaAPIError(f"HTTP {response.status_code}: {response.text}")
 
                     ads = data.get("data", [])
                     for ad in ads:
@@ -186,11 +190,12 @@ class MetaFetcher:
                         "meta_api_http_error",
                         status=exc.response.status_code,
                         page=page_num,
+                        response=exc.response.text,
                     )
                     if exc.response.status_code in (500, 503):
                         logger.warning("meta_api_server_error_skipping", page=page_num)
                         break
-                    raise
+                    raise MetaAPIError(f"HTTP Error {exc.response.status_code}: {exc.response.text}")
                 except Exception as exc:
                     logger.error("meta_api_unexpected_error", error=str(exc), page=page_num)
                     raise
@@ -214,13 +219,9 @@ class MetaFetcher:
                     logger.warning("meta_api_rate_limited", attempt=attempt + 1, wait_sec=wait)
                     await asyncio.sleep(wait)
                     continue
-                else:
-                    response.raise_for_status()
 
-            response.raise_for_status()
             return response
 
-        # Should not reach here, but just in case
         return response
 
 
