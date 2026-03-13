@@ -17,6 +17,8 @@ logger = get_logger(__name__)
 
 
 # Fields to request from the Meta Ads Library API
+# NOTE: ad_creatives{...} nested field expansion is NOT supported by /ads_archive.
+# Creative data comes through the flat fields below. Media URLs come via ad_snapshot_url.
 FIELDS_STRING = ",".join([
     "id",
     "ad_archive_id",
@@ -32,7 +34,8 @@ FIELDS_STRING = ",".join([
     "spend",
     "publisher_platforms",
     "is_active",
-    "ad_creatives{video_id,image_hash,thumbnail_url,video_sd_url,video_hd_url,image_url,body,call_to_action_type,link_url,title,description}",
+    "page_id",
+    "page_name",
 ])
 
 
@@ -51,7 +54,6 @@ class TokenBucketRateLimiter:
         while True:
             now = time.time()
 
-            # Lua script for atomic token bucket check-and-decrement
             lua_script = """
             local key = KEYS[1]
             local max_tokens = tonumber(ARGV[1])
@@ -67,7 +69,6 @@ class TokenBucketRateLimiter:
                 last_refill = now
             end
 
-            -- Refill tokens based on elapsed time
             local elapsed = now - last_refill
             tokens = math.min(max_tokens, tokens + elapsed * refill_rate)
 
@@ -79,7 +80,6 @@ class TokenBucketRateLimiter:
             else
                 redis.call('HMSET', key, 'tokens', tokens, 'last_refill', now)
                 redis.call('EXPIRE', key, 7200)
-                -- Return wait time in milliseconds
                 local wait = math.ceil((1 - tokens) / refill_rate * 1000)
                 return -wait
             end
@@ -88,7 +88,7 @@ class TokenBucketRateLimiter:
             result = await self.vk.eval(lua_script, 1, self.key, self.max_tokens, self.refill_rate, now)
 
             if result > 0:
-                return  # Token acquired
+                return
             else:
                 wait_ms = abs(result)
                 logger.info("rate_limit_waiting", wait_ms=wait_ms)
@@ -123,9 +123,11 @@ class MetaFetcher:
         Yields:
             Individual ad dictionaries from the API response
         """
+        # Build params — ad_reached_countries must be a JSON array string,
+        # passed as a plain string so httpx encodes it correctly as a query param.
         params = {
             "search_page_ids": page_id,
-            "ad_reached_countries": json.dumps(countries, separators=(',', ':')),
+            "ad_reached_countries": '["' + '","'.join(countries) + '"]',
             "ad_active_status": status,
             "fields": FIELDS_STRING,
             "limit": 100,
@@ -134,6 +136,13 @@ class MetaFetcher:
         url = self.base_url
         total_fetched = 0
         page_num = 0
+
+        logger.info(
+            "meta_fetch_starting",
+            page_id=page_id,
+            countries=countries,
+            status=status,
+        )
 
         async with httpx.AsyncClient(timeout=30) as client:
             while url:
@@ -148,12 +157,21 @@ class MetaFetcher:
 
                     data = response.json()
 
+                    # Log the raw response on first page for debugging
+                    if page_num == 1:
+                        logger.info(
+                            "meta_first_page_response",
+                            status_code=response.status_code,
+                            has_data="data" in data,
+                            has_error="error" in data,
+                            data_count=len(data.get("data", [])),
+                        )
+
                     # Check for API errors
                     if "error" in data:
                         error = data["error"]
                         error_code = error.get("code", 0)
 
-                        # Auth error — raise immediately
                         if error_code == 190:
                             logger.error("meta_api_auth_error", error=error)
                             raise MetaAPIError(f"Authentication error: {error.get('message', 'Unknown')}")
@@ -161,7 +179,6 @@ class MetaFetcher:
                         logger.error("meta_api_error", error=error, page=page_num)
                         raise MetaAPIError(f"Meta API Error ({error_code}): {error.get('message', 'Unknown')}")
 
-                    # If no 'data' key and no 'error', but response was bad
                     if response.status_code >= 400 and "data" not in data:
                         raise MetaAPIError(f"HTTP {response.status_code}: {response.text}")
 
@@ -178,10 +195,11 @@ class MetaFetcher:
                         total=total_fetched,
                     )
 
-                    # Navigate to the next page
+                    # Follow the next page URL as-is — Meta may return a different API version
+                    # in the next URL (e.g. v25.0), which is fine to follow directly.
                     next_page = data.get("paging", {}).get("next")
                     url = next_page
-                    params = {}  # Next URL already has params embedded
+                    params = {}  # Next URL already has all params embedded
 
                 except MetaAPIError:
                     raise

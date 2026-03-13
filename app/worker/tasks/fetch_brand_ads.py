@@ -1,6 +1,5 @@
 """Task: Fetch all ads for a brand — full pipeline (fetch → classify → download → score)."""
 
-import json
 import time
 from datetime import datetime, timezone
 
@@ -40,7 +39,6 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
     ad_active_status = payload.get("ad_active_status", "ALL")
 
     async with async_session_factory() as db:
-        # Update job status to RUNNING
         await db.execute(
             update(Job).where(Job.id == job_id).values(
                 status="RUNNING",
@@ -54,13 +52,11 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
     await queue.update_status(job_id, "RUNNING")
 
     try:
-        # Determine page_id
-        page_id = identifier if identifier_type == "page_id" else identifier
+        page_id = identifier  # Always treat identifier as page_id
 
-        # Initialize the Meta fetcher
         fetcher = MetaFetcher(vk)
 
-        # Upsert brand record
+        # Upsert brand record with identifier as placeholder name
         async with async_session_factory() as db:
             result = await db.execute(select(Brand).where(Brand.page_id == page_id))
             brand = result.scalar_one_or_none()
@@ -68,7 +64,7 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
             if not brand:
                 brand = Brand(
                     page_id=page_id,
-                    page_name=identifier,  # Will be updated from first ad's page_name
+                    page_name=identifier,
                 )
                 db.add(brand)
                 await db.flush()
@@ -79,19 +75,35 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
         # Fetch and process ads in batches
         ad_batch = []
         total_processed = 0
+        brand_page_name = None  # Will be extracted from first ad
 
         async for ad_raw in fetcher.fetch_all_ads_for_brand(page_id, countries, ad_active_status):
+            # Extract real page_name from first ad and update brand record
+            if brand_page_name is None:
+                brand_page_name = ad_raw.get("page_name")
+                if brand_page_name and brand_page_name != identifier:
+                    async with async_session_factory() as db:
+                        await db.execute(
+                            update(Brand).where(Brand.id == brand_id).values(
+                                page_name=brand_page_name,
+                            )
+                        )
+                        await db.commit()
+                    logger.info("brand_name_updated", page_name=brand_page_name)
+
             ad_batch.append(ad_raw)
 
             if len(ad_batch) >= BATCH_SIZE:
-                total_processed += await _process_batch(ad_batch, brand_id, page_id)
+                total_processed += await _process_batch(ad_batch, brand_id)
                 ad_batch.clear()
 
         # Process remaining ads
         if ad_batch:
-            total_processed += await _process_batch(ad_batch, brand_id, page_id)
+            total_processed += await _process_batch(ad_batch, brand_id)
 
-        # Update brand record
+        logger.info("fetch_pipeline_complete", total_processed=total_processed, brand_id=str(brand_id))
+
+        # Update brand record with final count
         async with async_session_factory() as db:
             await db.execute(
                 update(Brand).where(Brand.id == brand_id).values(
@@ -101,11 +113,13 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
             )
             await db.commit()
 
-        # Re-score all ads for this brand
+        # Re-score ALL ads for this brand (percentiles shift when new ads arrive)
+        scored = []
         async with async_session_factory() as db:
             result = await db.execute(select(Ad).where(Ad.brand_id == brand_id))
             all_ads = result.scalars().all()
 
+            logger.info("scoring_ads", total_ads=len(all_ads), brand_id=str(brand_id))
             scored = score_brand_ads(all_ads)
 
             for ad, score, label, percentile in scored:
@@ -118,7 +132,9 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
                 )
             await db.commit()
 
-        # Enqueue insight generation for inactive ads with performance labels
+        # Enqueue insight generation for ads that:
+        # - have a performance label (scored)
+        # - have media downloaded (media_local_path set)
         async with async_session_factory() as db:
             result = await db.execute(
                 select(Ad).where(
@@ -128,6 +144,7 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
                 )
             )
             scored_ads = result.scalars().all()
+            logger.info("enqueuing_insights", count=len(scored_ads))
 
             for ad in scored_ads:
                 insight_job = Job(
@@ -145,7 +162,7 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
 
             await db.commit()
 
-        # Mark job as DONE
+        # Mark job DONE
         elapsed_ms = (time.time() - start_time) * 1000
         metrics.record_timing("fetch_brand_total", elapsed_ms)
 
@@ -167,7 +184,7 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
         logger.info("fetch_brand_complete", job_id=job_id, total=total_processed)
 
     except Exception as exc:
-        logger.error("fetch_brand_failed", job_id=job_id, error=str(exc))
+        logger.error("fetch_brand_failed", job_id=job_id, error=str(exc), exc_info=True)
 
         async with async_session_factory() as db:
             await db.execute(
@@ -183,62 +200,61 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
         raise
 
 
-async def _process_batch(ad_batch: list[dict], brand_id, page_id: str) -> int:
+async def _process_batch(ad_batch: list[dict], brand_id) -> int:
     """Process a batch of raw ads: classify, download media, and upsert to DB."""
     processed = 0
 
     for ad_raw in ad_batch:
         try:
-            ad_archive_id = ad_raw.get("ad_archive_id", "")
+            # FIX: Fall back to 'id' if 'ad_archive_id' is missing.
+            # The Ads Library API sometimes returns only 'id'.
+            ad_archive_id = ad_raw.get("ad_archive_id") or ad_raw.get("id", "")
             if not ad_archive_id:
+                logger.warning("ad_missing_id", ad_raw_keys=list(ad_raw.keys()))
                 continue
 
-            # Classify
+            logger.info("processing_ad", ad_archive_id=ad_archive_id)
+
+            # Classify (metadata heuristics first, VL model fallback)
             ad_type, classification_method = await classify_ad(ad_raw)
 
-            # Extract metadata
-            creatives = ad_raw.get("ad_creatives", {}).get("data", [])
-            first_creative = creatives[0] if creatives else {}
-
             # Parse impression/reach/spend ranges
-            impressions = ad_raw.get("impressions", {})
-            reach = ad_raw.get("reach", {})
-            spend = ad_raw.get("spend", {})
+            impressions = ad_raw.get("impressions") or {}
+            reach = ad_raw.get("reach") or {}
+            spend = ad_raw.get("spend") or {}
 
-            # Determine media URLs
-            image_url = None
-            video_url = None
-            for c in creatives:
-                if not video_url:
-                    video_url = c.get("video_hd_url") or c.get("video_sd_url")
-                if not image_url:
-                    image_url = c.get("image_url") or c.get("thumbnail_url")
+            # Media: The Ads Library API does NOT return direct video/image URLs
+            # in the main response. ad_snapshot_url is the only reliable media reference.
+            # We use it as the image URL for static ads (it's a preview page, not a direct image).
+            # For actual downloadable media, use the snapshot URL directly as image.
+            snapshot_url = ad_raw.get("ad_snapshot_url")
 
             # Download media
             media_local_path = None
             frame_paths = None
             frame_metadata = None
 
-            if ad_type == "VIDEO" and video_url:
-                result = await download_and_extract_frames(video_url, ad_archive_id)
-                if result:
-                    frame_paths, frame_metadata = result
-                    media_local_path = frame_paths[0] if frame_paths else None
-            elif image_url:
-                media_local_path = await download_image(image_url, ad_archive_id)
+            if snapshot_url:
+                # Try downloading the snapshot as an image (works for static ads).
+                # For video ads the snapshot is a thumbnail, which is still useful.
+                media_local_path = await download_image(snapshot_url, ad_archive_id)
 
             # Parse dates
-            start_date = ad_raw.get("ad_delivery_start_time")
-            end_date = ad_raw.get("ad_delivery_stop_time")
+            start_date = _parse_date(ad_raw.get("ad_delivery_start_time"))
+            end_date = _parse_date(ad_raw.get("ad_delivery_stop_time"))
 
-            # Build caption from bodies
-            bodies = ad_raw.get("ad_creative_bodies", [])
-            caption = bodies[0] if bodies else first_creative.get("body")
+            # Build caption from bodies (deduplicate)
+            bodies = ad_raw.get("ad_creative_bodies") or []
+            seen = set()
+            unique_bodies = []
+            for b in bodies:
+                if b and b not in seen:
+                    seen.add(b)
+                    unique_bodies.append(b)
+            caption = unique_bodies[0] if unique_bodies else None
 
-            # Link info
-            link_titles = ad_raw.get("ad_creative_link_titles", [])
-            link_descs = ad_raw.get("ad_creative_link_descriptions", [])
-            link_captions = ad_raw.get("ad_creative_link_captions", [])
+            link_titles = ad_raw.get("ad_creative_link_titles") or []
+            link_descs = ad_raw.get("ad_creative_link_descriptions") or []
 
             # Upsert ad record
             async with async_session_factory() as db:
@@ -246,13 +262,13 @@ async def _process_batch(ad_batch: list[dict], brand_id, page_id: str) -> int:
                     ad_archive_id=ad_archive_id,
                     brand_id=brand_id,
                     page_name=ad_raw.get("page_name"),
-                    is_active=ad_raw.get("is_active", False),
+                    is_active=bool(ad_raw.get("is_active", False)),
                     ad_type=ad_type,
                     classification_method=classification_method,
                     caption=caption,
-                    link_title=link_titles[0] if link_titles else first_creative.get("title"),
-                    link_description=link_descs[0] if link_descs else first_creative.get("description"),
-                    cta_type=first_creative.get("call_to_action_type"),
+                    link_title=link_titles[0] if link_titles else None,
+                    link_description=link_descs[0] if link_descs else None,
+                    cta_type=None,  # Not available in flat Ads Library response
                     publisher_platforms=ad_raw.get("publisher_platforms"),
                     start_date=start_date,
                     end_date=end_date,
@@ -262,7 +278,7 @@ async def _process_batch(ad_batch: list[dict], brand_id, page_id: str) -> int:
                     reach_upper=_parse_range_value(reach, "upper_bound"),
                     spend_lower=_parse_range_value(spend, "lower_bound"),
                     spend_upper=_parse_range_value(spend, "upper_bound"),
-                    snapshot_url=ad_raw.get("ad_snapshot_url"),
+                    snapshot_url=snapshot_url,
                     media_local_path=media_local_path,
                     frame_paths=frame_paths,
                     frame_metadata=frame_metadata,
@@ -270,13 +286,15 @@ async def _process_batch(ad_batch: list[dict], brand_id, page_id: str) -> int:
                 ).on_conflict_do_update(
                     index_elements=["ad_archive_id"],
                     set_={
-                        "is_active": ad_raw.get("is_active", False),
+                        "is_active": bool(ad_raw.get("is_active", False)),
                         "impressions_lower": _parse_range_value(impressions, "lower_bound"),
                         "impressions_upper": _parse_range_value(impressions, "upper_bound"),
                         "reach_lower": _parse_range_value(reach, "lower_bound"),
                         "reach_upper": _parse_range_value(reach, "upper_bound"),
                         "spend_lower": _parse_range_value(spend, "lower_bound"),
                         "spend_upper": _parse_range_value(spend, "upper_bound"),
+                        "snapshot_url": snapshot_url,
+                        "media_local_path": media_local_path,
                         "raw_meta_json": ad_raw,
                         "updated_at": datetime.now(timezone.utc),
                     },
@@ -286,17 +304,33 @@ async def _process_batch(ad_batch: list[dict], brand_id, page_id: str) -> int:
 
             processed += 1
             metrics.increment("ads_processed")
+            logger.info("ad_upserted", ad_archive_id=ad_archive_id, ad_type=ad_type)
 
         except Exception as exc:
-            logger.error("ad_processing_error", ad_archive_id=ad_raw.get("ad_archive_id"), error=str(exc))
+            ad_id_for_log = ad_raw.get("ad_archive_id") or ad_raw.get("id", "unknown")
+            logger.error("ad_processing_error", ad_archive_id=ad_id_for_log, error=str(exc), exc_info=True)
             continue
 
     return processed
 
 
-def _parse_range_value(range_dict: dict | str, key: str) -> int | None:
+def _parse_date(value: str | None):
+    """Parse a date string from Meta API into a Python date object."""
+    if not value:
+        return None
+    try:
+        from datetime import date
+        # Meta returns ISO format: "2024-01-15T00:00:00+0000" or "2024-01-15"
+        if "T" in value:
+            return datetime.fromisoformat(value.replace("+0000", "+00:00")).date()
+        return date.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def _parse_range_value(range_dict: dict | str | None, key: str) -> int | None:
     """Parse a range value from Meta's impression/reach/spend data."""
-    if isinstance(range_dict, str):
+    if not range_dict or isinstance(range_dict, str):
         return None
     val = range_dict.get(key)
     if val is not None:

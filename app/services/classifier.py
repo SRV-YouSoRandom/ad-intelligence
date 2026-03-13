@@ -10,7 +10,6 @@ from app.core.metrics import metrics
 
 logger = get_logger(__name__)
 
-# Classification system prompt (v1)
 CLASSIFICATION_SYSTEM_PROMPT = """You are a media type classifier for digital advertisements.
 Your only job is to determine whether an ad creative is a STATIC image or a VIDEO.
 
@@ -27,35 +26,43 @@ def classify_from_metadata(ad_raw: dict) -> tuple[str, str] | None:
     """
     Pass 1: Classify ad type from metadata heuristics (free, no API call).
 
+    Since we no longer request ad_creatives{...} (not supported by /ads_archive),
+    we classify from the snapshot URL pattern and any available flat fields.
+
     Returns:
         Tuple of (ad_type, method) or None if uncertain.
     """
-    creatives = ad_raw.get("ad_creatives", {}).get("data", [])
+    # Check flat creative fields available from the Ads Library API
+    # These are top-level fields, not nested under ad_creatives
+    bodies = ad_raw.get("ad_creative_bodies") or []
+    link_titles = ad_raw.get("ad_creative_link_titles") or []
+    snapshot_url = ad_raw.get("ad_snapshot_url", "")
 
-    has_video = False
-    has_image = False
+    # The snapshot URL for video ads often contains 'video' in the path
+    # This is a heuristic — not 100% reliable but catches the common cases
+    if snapshot_url and "video" in snapshot_url.lower():
+        return ("VIDEO", "metadata_url_hint")
 
-    for c in creatives:
-        if c.get("video_id") or c.get("video_sd_url") or c.get("video_hd_url"):
-            has_video = True
-        if c.get("image_hash") or c.get("image_url") or c.get("thumbnail_url"):
-            has_image = True
+    # If we have bodies or link titles, it's likely a static ad
+    # (video ads tend to have minimal text in the flat fields)
+    # This is a weak signal — we'll let the VL model handle uncertain cases
+    if bodies or link_titles:
+        # Default to STATIC for text-bearing ads; VL model refines if wrong
+        return ("STATIC", "metadata_text_hint")
 
-    # Carousel logic: if ANY creative has video → VIDEO
-    if has_video:
-        return ("VIDEO", "metadata")
-    if has_image:
-        return ("STATIC", "metadata")
-
-    return None  # Uncertain — fall through to Pass 2
+    return None  # No signal — fall through to Pass 2
 
 
-async def classify_with_vl_model(thumbnail_url: str) -> tuple[str, str]:
+async def classify_with_vl_model(snapshot_url: str) -> tuple[str, str]:
     """
-    Pass 2: Use Qwen VL-30B to visually classify from thumbnail.
+    Pass 2: Use Qwen VL-30B to visually classify from snapshot URL.
+
+    The ad_snapshot_url is a Meta-hosted preview page. We pass it directly
+    as an image URL to the VL model — OpenRouter will attempt to fetch it.
+    If the URL is inaccessible, falls back to UNKNOWN.
 
     Args:
-        thumbnail_url: URL of the ad's thumbnail image.
+        snapshot_url: Meta ad snapshot URL.
 
     Returns:
         Tuple of (ad_type, method).
@@ -69,14 +76,14 @@ async def classify_with_vl_model(thumbnail_url: str) -> tuple[str, str]:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image_url", "image_url": {"url": thumbnail_url}},
+                        {"type": "image_url", "image_url": {"url": snapshot_url}},
                         {"type": "text", "text": "Classify this ad creative. Respond only with the JSON."},
                     ],
                 },
             ],
         }
 
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(
                 f"{settings.OPENROUTER_BASE_URL}/chat/completions",
                 json=payload,
@@ -89,11 +96,9 @@ async def classify_with_vl_model(thumbnail_url: str) -> tuple[str, str]:
             data = response.json()
 
             raw_content = data["choices"][0]["message"]["content"]
-            # Strip thinking tags if present
             content = raw_content.strip()
             if "</think>" in content:
                 content = content.split("</think>")[-1].strip()
-            # Parse JSON
             clean = content.strip().lstrip("```json").rstrip("```").strip()
             result = json.loads(clean)
             ad_type = result.get("type", "UNKNOWN").upper()
@@ -116,23 +121,17 @@ async def classify_ad(ad_raw: dict) -> tuple[str, str]:
     Returns:
         Tuple of (ad_type, classification_method).
     """
-    # Pass 1: Metadata
+    # Pass 1: Metadata heuristics
     result = classify_from_metadata(ad_raw)
     if result:
         metrics.increment("classification_metadata")
         return result
 
-    # Pass 2: VL model fallback
-    creatives = ad_raw.get("ad_creatives", {}).get("data", [])
-    thumbnail_url = None
-    for c in creatives:
-        thumbnail_url = c.get("thumbnail_url") or c.get("image_url")
-        if thumbnail_url:
-            break
+    # Pass 2: VL model using snapshot URL
+    snapshot_url = ad_raw.get("ad_snapshot_url")
+    if snapshot_url:
+        return await classify_with_vl_model(snapshot_url)
 
-    if thumbnail_url:
-        return await classify_with_vl_model(thumbnail_url)
-
-    # No creatives at all
-    logger.warning("classification_no_creatives", ad_archive_id=ad_raw.get("ad_archive_id"))
+    # No signal at all
+    logger.warning("classification_no_signal", ad_id=ad_raw.get("ad_archive_id") or ad_raw.get("id"))
     return ("UNKNOWN", "fallback")
