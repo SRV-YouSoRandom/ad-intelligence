@@ -12,6 +12,12 @@ class BrandSearchRequest(BaseModel):
     identifier_type: str = Field("name", pattern="^(name|page_id)$", description="'name' or 'page_id'")
     countries: list[str] = Field(default=["US"], description="ad_reached_countries, e.g. ['US', 'GB']")
     ad_active_status: str = Field("ALL", pattern="^(ALL|ACTIVE|INACTIVE)$")
+    max_ads: int | None = Field(
+        default=200,
+        ge=1,
+        le=10000,
+        description="Maximum number of ads to fetch and process. Defaults to 200. Set to None for no limit.",
+    )
 
 
 class BrandSearchResponse(BaseModel):

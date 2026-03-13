@@ -26,7 +26,7 @@ BATCH_SIZE = 50
 async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
     """
     Full brand ad fetch pipeline:
-    1. Fetch all ads from Meta API
+    1. Fetch ads from Meta API (up to max_ads if set)
     2. Classify each ad (static/video)
     3. Download media (images / video frames)
     4. Score inactive ads with performance data
@@ -37,6 +37,7 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
     identifier_type = payload["identifier_type"]
     countries = payload["countries"]
     ad_active_status = payload.get("ad_active_status", "ALL")
+    max_ads: int | None = payload.get("max_ads", 200)  # Default 200 if missing from older jobs
 
     async with async_session_factory() as db:
         await db.execute(
@@ -72,12 +73,25 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
             brand_id = brand.id
             await db.commit()
 
-        # Fetch and process ads in batches
+        # Fetch and process ads in batches, respecting max_ads
         ad_batch = []
-        total_processed = 0
-        brand_page_name = None  # Will be extracted from first ad
+        total_fetched = 0       # raw count of ads received from Meta API
+        total_processed = 0     # count of ads successfully upserted
+        brand_page_name = None  # will be extracted from first ad
+        limit_reached = False
 
         async for ad_raw in fetcher.fetch_all_ads_for_brand(page_id, countries, ad_active_status):
+            # Enforce max_ads limit on the raw fetch count
+            if max_ads is not None and total_fetched >= max_ads:
+                limit_reached = True
+                logger.info(
+                    "max_ads_limit_reached",
+                    max_ads=max_ads,
+                    total_fetched=total_fetched,
+                    brand_id=str(brand_id),
+                )
+                break
+
             # Extract real page_name from first ad and update brand record
             if brand_page_name is None:
                 brand_page_name = ad_raw.get("page_name")
@@ -92,16 +106,23 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
                     logger.info("brand_name_updated", page_name=brand_page_name)
 
             ad_batch.append(ad_raw)
+            total_fetched += 1
 
             if len(ad_batch) >= BATCH_SIZE:
                 total_processed += await _process_batch(ad_batch, brand_id)
                 ad_batch.clear()
 
-        # Process remaining ads
+        # Process any remaining ads in the last partial batch
         if ad_batch:
             total_processed += await _process_batch(ad_batch, brand_id)
 
-        logger.info("fetch_pipeline_complete", total_processed=total_processed, brand_id=str(brand_id))
+        logger.info(
+            "fetch_pipeline_complete",
+            total_fetched=total_fetched,
+            total_processed=total_processed,
+            limit_reached=limit_reached,
+            brand_id=str(brand_id),
+        )
 
         # Update brand record with final count
         async with async_session_factory() as db:
@@ -173,6 +194,8 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
                     result={
                         "total_ads": total_processed,
                         "scored_ads": len(scored),
+                        "limit_reached": limit_reached,
+                        "max_ads": max_ads,
                         "elapsed_ms": round(elapsed_ms, 1),
                     },
                     updated_at=datetime.now(timezone.utc),

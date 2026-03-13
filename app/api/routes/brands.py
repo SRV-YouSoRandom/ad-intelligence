@@ -36,6 +36,7 @@ async def search_brand(
             "identifier_type": request.identifier_type,
             "countries": request.countries,
             "ad_active_status": request.ad_active_status,
+            "max_ads": request.max_ads,  # None means unlimited
         },
     )
     db.add(job)
@@ -50,6 +51,7 @@ async def search_brand(
             "identifier_type": request.identifier_type,
             "countries": request.countries,
             "ad_active_status": request.ad_active_status,
+            "max_ads": request.max_ads,
         },
     })
     await vk.rpush("jobs:pending", job_payload)
@@ -60,10 +62,11 @@ async def search_brand(
         "updated_at": str(job.created_at),
     })
 
+    limit_msg = f" (capped at {request.max_ads} ads)" if request.max_ads else ""
     return BrandSearchResponse(
         job_id=job.id,
         status="PENDING",
-        message="Brand ad fetch queued. Poll /jobs/{job_id}/status for progress.",
+        message=f"Brand ad fetch queued{limit_msg}. Poll /jobs/{{job_id}}/status for progress.",
     )
 
 
