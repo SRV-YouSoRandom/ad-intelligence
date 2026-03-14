@@ -1,6 +1,6 @@
 import useSWR from 'swr';
 
-export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
+export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://173.249.22.107:8000/api/v1';
 
 export interface FetchError extends Error {
   info?: unknown;

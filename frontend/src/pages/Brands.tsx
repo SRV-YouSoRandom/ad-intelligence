@@ -6,6 +6,14 @@ import { Search, Loader2 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { Link } from 'react-router-dom';
 
+interface Brand {
+  id: string;
+  page_name: string | null;
+  page_id: string;
+  ad_count: number;
+  fetched_at: string;
+}
+
 export const Brands = () => {
   const { brands, isLoading, mutate } = useBrands();
   const [pageId, setPageId] = useState('');
@@ -128,7 +136,7 @@ export const Brands = () => {
                 </tr>
               </thead>
               <tbody>
-                {brands.map((brand: any) => (
+                {brands.map((brand: Brand) => (
                   <tr key={brand.id}>
                     <td>
                       <div style={{ fontWeight: 500 }}>{brand.page_name || 'Unknown'}</div>
