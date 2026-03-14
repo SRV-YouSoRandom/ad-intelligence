@@ -1,10 +1,7 @@
 """Pydantic schemas for insight-related responses."""
-# NOTE: If you see a validation error on analysis_mode from the ORM,
-# ensure you've run migration 002 and restarted containers.
 
 import uuid
 from datetime import datetime
-from typing import Any
 
 from pydantic import BaseModel
 

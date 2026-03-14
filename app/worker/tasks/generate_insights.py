@@ -20,10 +20,11 @@ async def run_generate_insights(job_id: str, payload: dict) -> None:
     """
     Generate creative insights for a single ad.
 
-    1. Load ad from DB
-    2. Call insight_generator.generate_insight()
-    3. Upsert into insights table
-    4. Update job status
+    Supports two modes (selected automatically by insight_generator):
+    - Visual: if valid local media exists (image or video frames)
+    - Text-only: if no media available — analyzes copy + performance data only
+
+    Media is NOT required. Text-only is a valid degraded path.
     """
     start_time = time.time()
     ad_id = payload["ad_id"]
@@ -31,7 +32,6 @@ async def run_generate_insights(job_id: str, payload: dict) -> None:
     vk = await get_valkey()
     queue = JobQueue(vk)
 
-    # Update job status to RUNNING
     async with async_session_factory() as db:
         await db.execute(
             update(Job).where(Job.id == job_id).values(
@@ -44,7 +44,6 @@ async def run_generate_insights(job_id: str, payload: dict) -> None:
     await queue.update_status(job_id, "RUNNING")
 
     try:
-        # Load ad
         async with async_session_factory() as db:
             result = await db.execute(select(Ad).where(Ad.id == ad_id))
             ad = result.scalar_one_or_none()
@@ -52,15 +51,13 @@ async def run_generate_insights(job_id: str, payload: dict) -> None:
         if not ad:
             raise ValueError(f"Ad not found: {ad_id}")
 
-        if not ad.media_local_path and not ad.frame_paths:
-            raise ValueError(f"Ad {ad_id} has no media available for analysis")
+        # NOTE: No media check here — insight_generator handles both visual
+        # and text-only modes automatically based on what's available.
+        # An ad with no media will use text-only mode, not fail.
 
-        # Generate insight
         insight_result = await generate_insight(ad)
 
-        # Upsert insight
         async with async_session_factory() as db:
-            # Check if insight already exists
             existing = await db.execute(select(Insight).where(Insight.ad_id == ad_id))
             existing_insight = existing.scalar_one_or_none()
 
@@ -69,6 +66,7 @@ async def run_generate_insights(job_id: str, payload: dict) -> None:
                 existing_insight.factors = insight_result.factors
                 existing_insight.model_used = insight_result.model_used
                 existing_insight.prompt_version = insight_result.prompt_version
+                existing_insight.analysis_mode = insight_result.analysis_mode
                 existing_insight.generated_at = datetime.now(timezone.utc)
             else:
                 insight = Insight(
@@ -77,12 +75,12 @@ async def run_generate_insights(job_id: str, payload: dict) -> None:
                     factors=insight_result.factors,
                     model_used=insight_result.model_used,
                     prompt_version=insight_result.prompt_version,
+                    analysis_mode=insight_result.analysis_mode,
                 )
                 db.add(insight)
 
             await db.commit()
 
-        # Mark job as DONE
         elapsed_ms = (time.time() - start_time) * 1000
         metrics.record_timing("generate_insight", elapsed_ms)
 
@@ -92,6 +90,7 @@ async def run_generate_insights(job_id: str, payload: dict) -> None:
                     status="DONE",
                     result={
                         "ad_id": str(ad_id),
+                        "analysis_mode": insight_result.analysis_mode,
                         "elapsed_ms": round(elapsed_ms, 1),
                     },
                     updated_at=datetime.now(timezone.utc),
@@ -100,7 +99,7 @@ async def run_generate_insights(job_id: str, payload: dict) -> None:
             await db.commit()
 
         await queue.update_status(job_id, "DONE")
-        logger.info("insight_generated", job_id=job_id, ad_id=ad_id)
+        logger.info("insight_generated", job_id=job_id, ad_id=ad_id, mode=insight_result.analysis_mode)
 
     except Exception as exc:
         logger.error("insight_generation_failed", job_id=job_id, ad_id=ad_id, error=str(exc))
