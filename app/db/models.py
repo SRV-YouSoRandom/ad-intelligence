@@ -129,6 +129,7 @@ class Insight(Base):
     factors = Column(JSONB, nullable=False)
     model_used = Column(Text, nullable=False)
     prompt_version = Column(Text, nullable=False, server_default=text("'v1'"))
+    analysis_mode = Column(Text, nullable=False, server_default=text("'visual'"))
     generated_at = Column(DateTime(timezone=True), server_default=text("NOW()"))
 
     # Relationships
