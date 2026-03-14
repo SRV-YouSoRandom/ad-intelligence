@@ -1,4 +1,4 @@
-import React from 'react';
+// Removed unused React import
 import { NavLink, Outlet } from 'react-router-dom';
 import { LayoutDashboard, Megaphone, Activity } from 'lucide-react';
 

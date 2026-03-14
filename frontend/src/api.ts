@@ -2,12 +2,17 @@ import useSWR from 'swr';
 
 export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000/api/v1';
 
+export interface FetchError extends Error {
+  info?: unknown;
+  status?: number;
+}
+
 export const fetcher = async (url: string) => {
   const res = await fetch(`${API_BASE_URL}${url}`);
   if (!res.ok) {
-    const error = new Error('An error occurred while fetching the data.');
-    (error as any).info = await res.json().catch(() => ({}));
-    (error as any).status = res.status;
+    const error: FetchError = new Error('An error occurred while fetching the data.');
+    error.info = await res.json().catch(() => ({}));
+    error.status = res.status;
     throw error;
   }
   return res.json();
@@ -36,7 +41,7 @@ export const useBrands = () => {
   return { brands: data?.brands || [], total: data?.total || 0, isLoading, error, mutate };
 };
 
-export const useAds = (params: Record<string, any>) => {
+export const useAds = (params: Record<string, string | number | boolean | null | undefined>) => {
   const query = new URLSearchParams();
   Object.entries(params).forEach(([key, value]) => {
     if (value !== undefined && value !== null && value !== '') {
