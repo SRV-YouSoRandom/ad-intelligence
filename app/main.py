@@ -3,6 +3,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.dependencies import close_valkey, init_valkey
 from app.api.routes import ads, brands, health, insights, jobs
@@ -34,6 +35,15 @@ app = FastAPI(
     description="Fetches Meta ads, classifies them, scores performance, and generates AI-powered creative insights.",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+# CORS — allow the Vite dev server and any other origin on the same host
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Tighten this in production if needed
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 # Register routers
