@@ -17,6 +17,7 @@ import base64
 import json
 import os
 from dataclasses import dataclass
+from PIL import Image
 
 import httpx
 
@@ -176,6 +177,20 @@ Produce 4 to 7 factors. Always include hook_strength and pacing."""
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
+def _is_valid_image(image_path: str) -> bool:
+    """
+    Check if a file is a valid image (not HTML or other content saved with .jpg extension).
+    The snapshot URL sometimes returns HTML pages — we must reject these.
+    """
+    try:
+        from PIL import Image
+        with Image.open(image_path) as img:
+            img.verify()
+        return True
+    except Exception:
+        return False
+
+
 def _encode_image(image_path: str) -> str:
     with open(image_path, "rb") as f:
         return base64.b64encode(f.read()).decode("utf-8")
@@ -288,7 +303,11 @@ async def generate_insight(ad: Ad) -> InsightResult:
     The text-only path is explicitly documented in the insight output via
     the analysis_mode field, so downstream consumers know the limitation.
     """
-    has_image = ad.media_local_path and os.path.exists(ad.media_local_path)
+    has_image = (
+        ad.media_local_path
+        and os.path.exists(ad.media_local_path)
+        and _is_valid_image(ad.media_local_path)
+    )
     has_frames = ad.frame_metadata and len(ad.frame_metadata) > 0
 
     if ad.ad_type == "VIDEO" and has_frames:
@@ -334,6 +353,16 @@ async def generate_insight(ad: Ad) -> InsightResult:
             )
             response.raise_for_status()
             data = response.json()
+
+            if "choices" not in data:
+                # OpenRouter returned an error object instead of a completion
+                logger.error(
+                    "openrouter_no_choices",
+                    ad_id=str(ad.id),
+                    response=data,
+                )
+                raise ValueError(f"OpenRouter returned no choices. Response: {data}")
+
             raw_content = data["choices"][0]["message"]["content"]
             result = _parse_insight_response(raw_content, mode)
             result.model_used = settings.INSIGHT_MODEL
