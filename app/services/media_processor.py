@@ -1,312 +1,424 @@
-"""Task: Fetch all ads for a brand — fetch → classify → score. No auto insight generation."""
+"""
+Media processor — fetches real media from Meta snapshot HTML pages,
+downloads images, extracts scene-change-aware frames from videos.
 
-import time
-from datetime import datetime, timezone
+WHY THE SNAPSHOT APPROACH:
+The Meta Ads Library API does not return direct image or video URLs.
+The `ad_snapshot_url` points to a rendered HTML preview page at:
+  https://www.facebook.com/ads/archive/render_ad/?id=...&access_token=...
 
-from sqlalchemy import select, update
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+This page contains the actual <img> and <video> elements with real CDN URLs.
+We parse this HTML to extract those URLs — this is the only sanctioned way
+to access ad creative media through the Ads Library system.
+"""
 
-from app.api.dependencies import get_valkey
+import asyncio
+import json
+import os
+import re
+from dataclasses import dataclass
+from pathlib import Path
+
+import httpx
+from bs4 import BeautifulSoup
+
+from app.core.config import settings
 from app.core.logging import get_logger
 from app.core.metrics import metrics
-from app.db.models import Ad, Brand, Job
-from app.db.session import async_session_factory
-from app.services.classifier import classify_ad
-from app.services.media_processor import fetch_media_from_snapshot
-from app.services.meta_fetcher import MetaFetcher
-from app.services.performance_scorer import score_brand_ads
-from app.worker.queue import JobQueue
 
 logger = get_logger(__name__)
 
-BATCH_SIZE = 50
+_download_semaphore: asyncio.Semaphore | None = None
 
 
-async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
+def _get_semaphore() -> asyncio.Semaphore:
+    global _download_semaphore
+    if _download_semaphore is None:
+        _download_semaphore = asyncio.Semaphore(settings.MAX_CONCURRENT_DOWNLOADS)
+    return _download_semaphore
+
+
+@dataclass
+class FrameMeta:
+    path: str
+    timestamp_sec: float
+    scene_score: float
+    index: int
+    is_hook: bool
+
+
+def _ensure_ad_dir(ad_archive_id: str) -> Path:
+    ad_dir = Path(settings.MEDIA_STORAGE_PATH) / ad_archive_id
+    ad_dir.mkdir(parents=True, exist_ok=True)
+    return ad_dir
+
+
+# ── Snapshot HTML Parsing ──────────────────────────────────────────────────────
+
+async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str) -> dict | None:
     """
-    Brand ad fetch pipeline — intentionally stops before insight generation.
+    Fetch the snapshot HTML page and extract real media URLs from it.
 
-    Flow:
-    1. Fetch ads from Meta API (up to max_ads)
-    2. Classify each ad type (STATIC/VIDEO) via metadata heuristics
-    3. Attempt media extraction from snapshot URL HTML
-    4. Score inactive ads with available performance data
-    5. STOP — insights are generated on-demand by user action only
+    The snapshot page renders the ad creative. We parse the HTML for:
+    - <img> tags with high-res src (for static ads)
+    - <video> tags with src (for video ads)
+    - og:image meta tags as fallback
 
-    Insight generation is explicitly NOT triggered here. Users choose which
-    ads to analyze via POST /ads/{ad_id}/insights/generate.
+    Returns:
+        Dict with media_local_path, frame_paths, frame_metadata keys, or None on failure.
     """
-    start_time = time.time()
-    identifier = payload["identifier"]
-    countries = payload["countries"]
-    ad_active_status = payload.get("ad_active_status", "ALL")
-    max_ads: int | None = payload.get("max_ads", 200)
-
-    async with async_session_factory() as db:
-        await db.execute(
-            update(Job).where(Job.id == job_id).values(
-                status="RUNNING",
-                updated_at=datetime.now(timezone.utc),
-            )
-        )
-        await db.commit()
-
-    vk = await get_valkey()
-    queue = JobQueue(vk)
-    await queue.update_status(job_id, "RUNNING")
-
-    try:
-        page_id = identifier
-        fetcher = MetaFetcher(vk)
-
-        # Upsert brand record
-        async with async_session_factory() as db:
-            result = await db.execute(select(Brand).where(Brand.page_id == page_id))
-            brand = result.scalar_one_or_none()
-            if not brand:
-                brand = Brand(page_id=page_id, page_name=identifier)
-                db.add(brand)
-                await db.flush()
-            brand_id = brand.id
-            await db.commit()
-
-        # Fetch and process ads in batches
-        ad_batch = []
-        total_fetched = 0
-        total_processed = 0
-        brand_page_name = None
-        limit_reached = False
-
-        async for ad_raw in fetcher.fetch_all_ads_for_brand(page_id, countries, ad_active_status):
-            if max_ads is not None and total_fetched >= max_ads:
-                limit_reached = True
-                logger.info("max_ads_limit_reached", max_ads=max_ads, total_fetched=total_fetched)
-                break
-
-            # Extract real page_name from first ad
-            if brand_page_name is None:
-                brand_page_name = ad_raw.get("page_name")
-                if brand_page_name and brand_page_name != identifier:
-                    async with async_session_factory() as db:
-                        await db.execute(
-                            update(Brand).where(Brand.id == brand_id).values(page_name=brand_page_name)
-                        )
-                        await db.commit()
-                    logger.info("brand_name_updated", page_name=brand_page_name)
-
-            ad_batch.append(ad_raw)
-            total_fetched += 1
-
-            if len(ad_batch) >= BATCH_SIZE:
-                total_processed += await _process_batch(ad_batch, brand_id)
-                ad_batch.clear()
-
-        if ad_batch:
-            total_processed += await _process_batch(ad_batch, brand_id)
-
-        logger.info(
-            "fetch_pipeline_complete",
-            total_fetched=total_fetched,
-            total_processed=total_processed,
-            limit_reached=limit_reached,
-        )
-
-        # Update brand count
-        async with async_session_factory() as db:
-            await db.execute(
-                update(Brand).where(Brand.id == brand_id).values(
-                    ad_count=total_processed,
-                    fetched_at=datetime.now(timezone.utc),
-                )
-            )
-            await db.commit()
-
-        # Score all ads for this brand (pure math, no external API calls)
-        scored = []
-        async with async_session_factory() as db:
-            result = await db.execute(select(Ad).where(Ad.brand_id == brand_id))
-            all_ads = result.scalars().all()
-            scored = score_brand_ads(all_ads)
-            for ad, score, label, percentile in scored:
-                await db.execute(
-                    update(Ad).where(Ad.id == ad.id).values(
-                        performance_score=score,
-                        performance_label=label,
-                        performance_percentile=percentile,
-                    )
-                )
-            await db.commit()
-
-        logger.info(
-            "scoring_complete",
-            total_ads=len(all_ads),
-            scored=len(scored),
-            # Insights will be generated on-demand — none auto-enqueued here
-        )
-
-        elapsed_ms = (time.time() - start_time) * 1000
-        metrics.record_timing("fetch_brand_total", elapsed_ms)
-
-        async with async_session_factory() as db:
-            await db.execute(
-                update(Job).where(Job.id == job_id).values(
-                    status="DONE",
-                    result={
-                        "total_ads": total_processed,
-                        "scored_ads": len(scored),
-                        "limit_reached": limit_reached,
-                        "max_ads": max_ads,
-                        "elapsed_ms": round(elapsed_ms, 1),
-                        "note": "Insights not auto-generated. Use POST /ads/{id}/insights/generate per ad.",
-                    },
-                    updated_at=datetime.now(timezone.utc),
-                )
-            )
-            await db.commit()
-
-        await queue.update_status(job_id, "DONE")
-        logger.info("fetch_brand_complete", job_id=job_id, total=total_processed)
-
-    except Exception as exc:
-        logger.error("fetch_brand_failed", job_id=job_id, error=str(exc), exc_info=True)
-        async with async_session_factory() as db:
-            await db.execute(
-                update(Job).where(Job.id == job_id).values(
-                    status="FAILED",
-                    error=str(exc),
-                    updated_at=datetime.now(timezone.utc),
-                )
-            )
-            await db.commit()
-        await queue.update_status(job_id, "FAILED")
-        raise
-
-
-async def _process_batch(ad_batch: list[dict], brand_id) -> int:
-    """Process a batch of raw ads: classify, attempt media fetch, upsert to DB."""
-    processed = 0
-
-    for ad_raw in ad_batch:
+    async with _get_semaphore():
         try:
-            ad_archive_id = ad_raw.get("ad_archive_id") or ad_raw.get("id", "")
-            if not ad_archive_id:
-                logger.warning("ad_missing_id", keys=list(ad_raw.keys()))
-                continue
+            headers = {
+                "User-Agent": "Mozilla/5.0 (compatible; AdIntelligence/1.0)",
+                "Accept": "text/html,application/xhtml+xml",
+            }
 
-            # Classify from metadata only — no VL model calls during bulk fetch
-            ad_type, classification_method = await classify_ad(ad_raw)
+            async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+                response = await client.get(snapshot_url, headers=headers)
 
-            impressions = ad_raw.get("impressions") or {}
-            reach = ad_raw.get("reach") or {}
-            spend = ad_raw.get("spend") or {}
-            snapshot_url = ad_raw.get("ad_snapshot_url")
+                if response.status_code != 200:
+                    logger.warning(
+                        "snapshot_fetch_failed",
+                        ad_id=ad_archive_id,
+                        status=response.status_code,
+                    )
+                    return None
 
-            # Attempt to extract real media URL from the snapshot HTML page.
-            # The snapshot URL renders an HTML page — we parse it to find the
-            # actual image/video src. This is the only way to get direct media
-            # from the Ads Library API (no direct URLs are returned in the JSON).
-            media_local_path = None
-            frame_paths = None
-            frame_metadata = None
+                html = response.text
 
-            if snapshot_url:
-                media_result = await fetch_media_from_snapshot(snapshot_url, ad_archive_id)
-                if media_result:
-                    media_local_path = media_result.get("media_local_path")
-                    frame_paths = media_result.get("frame_paths")
-                    frame_metadata = media_result.get("frame_metadata")
+            # Parse HTML for media URLs
+            image_url, video_url = _extract_media_urls(html, snapshot_url)
 
-            start_date = _parse_date(ad_raw.get("ad_delivery_start_time"))
-            end_date = _parse_date(ad_raw.get("ad_delivery_stop_time"))
+            if video_url:
+                logger.info("snapshot_video_found", ad_id=ad_archive_id, url=video_url[:80])
+                result = await download_and_extract_frames(video_url, ad_archive_id)
+                if result:
+                    frame_paths, frame_metadata = result
+                    return {
+                        "media_local_path": frame_paths[0] if frame_paths else None,
+                        "frame_paths": frame_paths,
+                        "frame_metadata": frame_metadata,
+                    }
 
-            bodies = ad_raw.get("ad_creative_bodies") or []
-            seen, unique_bodies = set(), []
-            for b in bodies:
-                if b and b not in seen:
-                    seen.add(b)
-                    unique_bodies.append(b)
-            caption = unique_bodies[0] if unique_bodies else None
+            if image_url:
+                logger.info("snapshot_image_found", ad_id=ad_archive_id, url=image_url[:80])
+                local_path = await download_image(image_url, ad_archive_id)
+                if local_path:
+                    return {
+                        "media_local_path": local_path,
+                        "frame_paths": None,
+                        "frame_metadata": None,
+                    }
 
-            link_titles = ad_raw.get("ad_creative_link_titles") or []
-            link_descs = ad_raw.get("ad_creative_link_descriptions") or []
-
-            async with async_session_factory() as db:
-                stmt = pg_insert(Ad).values(
-                    ad_archive_id=ad_archive_id,
-                    brand_id=brand_id,
-                    page_name=ad_raw.get("page_name"),
-                    is_active=bool(ad_raw.get("is_active", False)),
-                    ad_type=ad_type,
-                    classification_method=classification_method,
-                    caption=caption,
-                    link_title=link_titles[0] if link_titles else None,
-                    link_description=link_descs[0] if link_descs else None,
-                    cta_type=None,
-                    publisher_platforms=ad_raw.get("publisher_platforms"),
-                    start_date=start_date,
-                    end_date=end_date,
-                    impressions_lower=_parse_range_value(impressions, "lower_bound"),
-                    impressions_upper=_parse_range_value(impressions, "upper_bound"),
-                    reach_lower=_parse_range_value(reach, "lower_bound"),
-                    reach_upper=_parse_range_value(reach, "upper_bound"),
-                    spend_lower=_parse_range_value(spend, "lower_bound"),
-                    spend_upper=_parse_range_value(spend, "upper_bound"),
-                    snapshot_url=snapshot_url,
-                    media_local_path=media_local_path,
-                    frame_paths=frame_paths,
-                    frame_metadata=frame_metadata,
-                    raw_meta_json=ad_raw,
-                ).on_conflict_do_update(
-                    index_elements=["ad_archive_id"],
-                    set_={
-                        "is_active": bool(ad_raw.get("is_active", False)),
-                        "impressions_lower": _parse_range_value(impressions, "lower_bound"),
-                        "impressions_upper": _parse_range_value(impressions, "upper_bound"),
-                        "reach_lower": _parse_range_value(reach, "lower_bound"),
-                        "reach_upper": _parse_range_value(reach, "upper_bound"),
-                        "spend_lower": _parse_range_value(spend, "lower_bound"),
-                        "spend_upper": _parse_range_value(spend, "upper_bound"),
-                        "snapshot_url": snapshot_url,
-                        "media_local_path": media_local_path,
-                        "raw_meta_json": ad_raw,
-                        "updated_at": datetime.now(timezone.utc),
-                    },
-                )
-                await db.execute(stmt)
-                await db.commit()
-
-            processed += 1
-            metrics.increment("ads_processed")
-            logger.info("ad_upserted", ad_archive_id=ad_archive_id, ad_type=ad_type,
-                        has_media=media_local_path is not None)
+            logger.warning("snapshot_no_media_found", ad_id=ad_archive_id)
+            return None
 
         except Exception as exc:
-            ad_id_for_log = ad_raw.get("ad_archive_id") or ad_raw.get("id", "unknown")
-            logger.error("ad_processing_error", ad_archive_id=ad_id_for_log, error=str(exc), exc_info=True)
-            continue
-
-    return processed
-
-
-def _parse_date(value: str | None):
-    if not value:
-        return None
-    try:
-        from datetime import date
-        if "T" in value:
-            return datetime.fromisoformat(value.replace("+0000", "+00:00")).date()
-        return date.fromisoformat(value)
-    except Exception:
-        return None
-
-
-def _parse_range_value(range_dict: dict | str | None, key: str) -> int | None:
-    if not range_dict or isinstance(range_dict, str):
-        return None
-    val = range_dict.get(key)
-    if val is not None:
-        try:
-            return int(val)
-        except (ValueError, TypeError):
+            logger.error("snapshot_fetch_error", ad_id=ad_archive_id, error=str(exc))
             return None
+
+
+def _extract_media_urls(html: str, base_url: str) -> tuple[str | None, str | None]:
+    """
+    Parse snapshot HTML to extract image and video URLs.
+
+    Priority order:
+    1. <video src="..."> or <video><source src="..."> — for video ads
+    2. <img> with largest dimensions or data-src — for static ads
+    3. og:image meta tag — fallback for static ads
+
+    Returns:
+        Tuple of (image_url, video_url). Either may be None.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    # 1. Look for video elements
+    video_url = None
+    video_tags = soup.find_all("video")
+    for video in video_tags:
+        src = video.get("src") or ""
+        if src and src.startswith("http"):
+            video_url = src
+            break
+        # Check <source> children
+        source = video.find("source")
+        if source:
+            src = source.get("src") or ""
+            if src and src.startswith("http"):
+                video_url = src
+                break
+
+    # Also check JSON-LD or inline scripts for video URLs (Facebook often embeds these)
+    if not video_url:
+        scripts = soup.find_all("script", type="application/json")
+        for script in scripts:
+            try:
+                data = json.loads(script.string or "")
+                video_url = _find_video_url_in_json(data)
+                if video_url:
+                    break
+            except Exception:
+                pass
+
+    # 2. Look for image elements
+    image_url = None
+
+    # og:image is often the best quality
+    og_image = soup.find("meta", property="og:image")
+    if og_image:
+        image_url = og_image.get("content")
+
+    # If no og:image, look for the largest <img> that isn't a profile pic/icon
+    if not image_url:
+        imgs = soup.find_all("img")
+        candidates = []
+        for img in imgs:
+            src = img.get("src") or img.get("data-src") or ""
+            if not src or not src.startswith("http"):
+                continue
+            # Skip small icons and profile pictures (usually contain 's60x60' or similar)
+            if any(x in src for x in ["s60x60", "s40x40", "emoji", "static/images"]):
+                continue
+            # Prefer larger images from fbcdn (Meta's CDN)
+            if "fbcdn" in src or "cdninstagram" in src:
+                width = img.get("width", 0)
+                try:
+                    candidates.append((int(width), src))
+                except (ValueError, TypeError):
+                    candidates.append((0, src))
+
+        if candidates:
+            candidates.sort(reverse=True)
+            image_url = candidates[0][1]
+
+    return image_url, video_url
+
+
+def _find_video_url_in_json(data, depth=0) -> str | None:
+    """Recursively search JSON structure for video URLs."""
+    if depth > 10:
+        return None
+    if isinstance(data, str):
+        if data.startswith("https://") and any(ext in data for ext in [".mp4", ".mov", "video"]):
+            return data
+    elif isinstance(data, dict):
+        for v in data.values():
+            result = _find_video_url_in_json(v, depth + 1)
+            if result:
+                return result
+    elif isinstance(data, list):
+        for item in data:
+            result = _find_video_url_in_json(item, depth + 1)
+            if result:
+                return result
     return None
+
+
+# ── Image Download ─────────────────────────────────────────────────────────────
+
+async def download_image(url: str, ad_archive_id: str) -> str | None:
+    """Download a static image."""
+    ad_dir = _ensure_ad_dir(ad_archive_id)
+    output_path = ad_dir / "image.jpg"
+
+    try:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            with open(output_path, "wb") as f:
+                f.write(response.content)
+            metrics.increment("images_downloaded")
+            logger.info("image_downloaded", ad_id=ad_archive_id, size=len(response.content))
+            return str(output_path)
+    except Exception as exc:
+        logger.error("image_download_failed", ad_id=ad_archive_id, error=str(exc))
+        return None
+
+
+# ── Video Download + Frame Extraction ─────────────────────────────────────────
+
+async def download_video(video_url: str, ad_archive_id: str) -> str | None:
+    """Download a video using yt-dlp."""
+    ad_dir = _ensure_ad_dir(ad_archive_id)
+    output_path = ad_dir / "video.mp4"
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "yt-dlp", "--no-warnings",
+            "-o", str(output_path),
+            "--format", "best[ext=mp4]/best",
+            video_url,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
+        if process.returncode != 0:
+            logger.error("video_download_failed", ad_id=ad_archive_id, stderr=stderr.decode())
+            return None
+        if output_path.exists():
+            metrics.increment("videos_downloaded")
+            return str(output_path)
+        return None
+    except asyncio.TimeoutError:
+        logger.error("video_download_timeout", ad_id=ad_archive_id)
+        return None
+    except Exception as exc:
+        logger.error("video_download_error", ad_id=ad_archive_id, error=str(exc))
+        return None
+
+
+async def get_video_duration(video_path: str) -> float | None:
+    """Get video duration using ffprobe."""
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", video_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=30)
+        data = json.loads(stdout.decode())
+        for stream in data.get("streams", []):
+            if stream.get("codec_type") == "video":
+                duration = stream.get("duration")
+                if duration:
+                    return float(duration)
+        return None
+    except Exception as exc:
+        logger.error("ffprobe_error", video_path=video_path, error=str(exc))
+        return None
+
+
+def _parse_scene_log(scene_log_path: str, output_dir: str) -> list[FrameMeta]:
+    """Parse ffmpeg showinfo output to extract scene-change frames with timestamps."""
+    frames = []
+    frame_files = sorted(Path(output_dir).glob("frame_*.jpg"))
+    if not frame_files:
+        return frames
+    try:
+        with open(scene_log_path, "r", errors="replace") as f:
+            log_content = f.read()
+        pts_times = re.findall(r"pts_time:\s*([\d.]+)", log_content)
+        for i, frame_file in enumerate(frame_files):
+            timestamp = float(pts_times[i]) if i < len(pts_times) else 0.0
+            frames.append(FrameMeta(
+                path=str(frame_file), timestamp_sec=timestamp,
+                scene_score=0.30, index=i, is_hook=timestamp < 2.0,
+            ))
+    except Exception as exc:
+        logger.warning("scene_log_parse_error", error=str(exc))
+        for i, frame_file in enumerate(frame_files):
+            frames.append(FrameMeta(
+                path=str(frame_file), timestamp_sec=0.0,
+                scene_score=0.30, index=i, is_hook=i == 0,
+            ))
+    return frames
+
+
+async def _extract_first_frame(video_path: str, output_dir: str) -> FrameMeta | None:
+    """Extract the very first frame (hook frame)."""
+    frame_path = os.path.join(output_dir, "frame_000_hook.jpg")
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", video_path,
+            "-vf", "select='eq(n,0)',scale=1280:-1", "-vframes", "1", frame_path,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        await asyncio.wait_for(process.communicate(), timeout=30)
+        if os.path.exists(frame_path):
+            return FrameMeta(path=frame_path, timestamp_sec=0.0, scene_score=1.0, index=0, is_hook=True)
+    except Exception as exc:
+        logger.error("first_frame_extraction_error", error=str(exc))
+    return None
+
+
+async def _uniform_fallback(video_path: str, output_dir: str, points: list[float] = None) -> list[FrameMeta]:
+    """Fallback: extract frames at fixed percentage points."""
+    if points is None:
+        points = [0.0, 0.5, 0.9]
+    duration = await get_video_duration(video_path)
+    if not duration or duration <= 0:
+        return []
+    frames = []
+    for i, pct in enumerate(points):
+        timestamp = duration * pct
+        frame_path = os.path.join(output_dir, f"frame_uniform_{i:03d}.jpg")
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "ffmpeg", "-y", "-ss", str(timestamp), "-i", video_path,
+                "-vf", "scale=1280:-1", "-vframes", "1", frame_path,
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(process.communicate(), timeout=15)
+            if os.path.exists(frame_path):
+                frames.append(FrameMeta(
+                    path=frame_path, timestamp_sec=round(timestamp, 2),
+                    scene_score=0.0, index=i, is_hook=timestamp < 2.0,
+                ))
+        except Exception as exc:
+            logger.warning("uniform_frame_error", timestamp=timestamp, error=str(exc))
+    return frames
+
+
+async def extract_frames(video_path: str, ad_archive_id: str) -> list[FrameMeta]:
+    """Extract scene-change-aware frames from a video."""
+    ad_dir = _ensure_ad_dir(ad_archive_id)
+    output_dir = str(ad_dir)
+    scene_log_path = os.path.join(output_dir, "scene_log.txt")
+    threshold = settings.SCENE_CHANGE_THRESHOLD
+
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y", "-i", video_path,
+            "-vf", f"select='gte(scene,{threshold})',scale=1280:-1,showinfo",
+            "-vsync", "vfr", "-frame_pts", "true",
+            os.path.join(output_dir, "frame_%03d.jpg"),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=open(scene_log_path, "w"),
+        )
+        await asyncio.wait_for(process.communicate(), timeout=120)
+    except asyncio.TimeoutError:
+        logger.error("frame_extraction_timeout", ad_id=ad_archive_id)
+    except Exception as exc:
+        logger.error("frame_extraction_error", ad_id=ad_archive_id, error=str(exc))
+
+    frames = _parse_scene_log(scene_log_path, output_dir)
+
+    has_hook = any(f.timestamp_sec < 0.5 for f in frames)
+    if not has_hook:
+        hook_frame = await _extract_first_frame(video_path, output_dir)
+        if hook_frame:
+            frames.insert(0, hook_frame)
+
+    frames = frames[:settings.MAX_FRAMES]
+
+    if len(frames) < 2:
+        logger.info("scene_detection_sparse_fallback", ad_id=ad_archive_id)
+        frames = await _uniform_fallback(video_path, output_dir, [0.0, 0.5, 0.9])
+
+    for i, frame in enumerate(frames):
+        frame.index = i
+
+    metrics.increment("video_frames_extracted", len(frames))
+    return frames
+
+
+async def download_and_extract_frames(video_url: str, ad_archive_id: str) -> tuple[list[str], list[dict]] | None:
+    """Full video pipeline: download → extract frames → delete source video."""
+    video_path = await download_video(video_url, ad_archive_id)
+    if not video_path:
+        return None
+    frames = await extract_frames(video_path, ad_archive_id)
+    if not frames:
+        return None
+    frame_paths = [f.path for f in frames]
+    frame_metadata = [
+        {"path": f.path, "timestamp_sec": f.timestamp_sec, "scene_score": f.scene_score,
+         "index": f.index, "is_hook": f.is_hook}
+        for f in frames
+    ]
+    try:
+        os.remove(video_path)
+        logger.info("video_deleted_after_extraction", ad_id=ad_archive_id)
+    except OSError:
+        pass
+    return frame_paths, frame_metadata

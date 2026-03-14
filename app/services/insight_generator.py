@@ -13,13 +13,10 @@ The Meta Ads Library API does not provide direct media URLs. Media availability
 depends on successful HTML parsing of the snapshot page.
 """
 
-# need os for path existence check
-import os
-
 import base64
 import json
+import os
 from dataclasses import dataclass
-
 
 import httpx
 
