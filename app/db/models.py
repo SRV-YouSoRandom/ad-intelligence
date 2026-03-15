@@ -3,9 +3,10 @@
 import uuid
 from datetime import datetime
 
+import sqlalchemy as sa
 from sqlalchemy import (
     BigInteger, Boolean, CheckConstraint, Column, Computed,
-    Date, DateTime, ForeignKey, Index, Numeric, Text, text,
+    Date, DateTime, ForeignKey, Index, Integer, Numeric, Text, text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -141,6 +142,25 @@ class Insight(Base):
     generated_at = Column(DateTime(timezone=True), server_default=text("NOW()"))
 
     ad = relationship("Ad", back_populates="insight")
+
+
+class BrandRecommendation(Base):
+    """Cached AI-generated strategy report for a brand.
+    One row per brand. Regenerated only when insights_fingerprint changes
+    (i.e. new insights have been added since last generation).
+    """
+    __tablename__ = "brand_recommendations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=text("gen_random_uuid()"))
+    brand_id = Column(UUID(as_uuid=True), ForeignKey("brands.id", ondelete="CASCADE"), unique=True, nullable=False)
+    brand_context = Column(Text, nullable=False)
+    total_ads_analyzed = Column(sa.Integer(), nullable=False)
+    # SHA-256 of sorted insight IDs — if this changes, the cached report is stale
+    insights_fingerprint = Column(Text, nullable=False)
+    result = Column(JSONB, nullable=False)
+    generated_at = Column(DateTime(timezone=True), server_default=text("NOW()"))
+
+    brand = relationship("Brand", backref="recommendation")
 
 
 class Job(Base):

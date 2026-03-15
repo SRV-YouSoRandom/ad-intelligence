@@ -40,9 +40,11 @@ class BrandListResponse(BaseModel):
 class BrandRecommendationResponse(BaseModel):
     brand_id: uuid.UUID
     brand_name: str
-    brand_context: str  # 'commercial' | 'political'
+    brand_context: str          # 'commercial' | 'political'
     total_ads_analyzed: int
     static_patterns: dict[str, Any]
     video_patterns: dict[str, Any]
     hypotheses_to_test: list[dict[str, Any]]
     portfolio_summary: str
+    cached: bool = False        # True = served from DB, no AI call made
+    generated_at: str | None = None
