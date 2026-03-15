@@ -18,7 +18,6 @@ export interface Ad {
   end_date: string | null;
   impressions_mid: number | null;
   performance_label: string | null;
-  media_local_path?: string | null;
 }
 
 const labelStyle: React.CSSProperties = {
@@ -163,26 +162,17 @@ export const Ads = () => {
                 </tr>
               </thead>
               <motion.tbody initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ duration: 0.25 }}>
-                {ads.map((ad: Ad) => {
-                  const localImgUrl = ad.media_local_path
-                    ? `${import.meta.env.VITE_API_URL?.replace('/api/v1', '')}/media/${ad.media_local_path.split('/media_storage/').pop()}`
-                    : null;
-                  
-                  return (
+                {ads.map((ad: Ad) => (
                   <tr key={String(ad.id)}>
                     <td style={{ maxWidth: 320 }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                         <div style={{
-                          width: 48, height: 48, borderRadius: 8, flexShrink: 0,
+                          width: 38, height: 38, borderRadius: 8, flexShrink: 0,
                           backgroundColor: 'var(--bg-surface-hover)', border: '1px solid var(--border-subtle)',
                           display: 'flex', alignItems: 'center', justifyContent: 'center',
-                          color: 'var(--text-tertiary)', overflow: 'hidden'
+                          color: 'var(--text-tertiary)',
                         }}>
-                          {localImgUrl ? (
-                            <img src={localImgUrl} alt="Ad creative" style={{ width: '100%', height: '100%', objectFit: 'cover' }} onError={(e) => { e.currentTarget.style.display = 'none'; e.currentTarget.parentElement!.innerHTML = getTypeIcon(ad.ad_type) as any; }} />
-                          ) : (
-                            getTypeIcon(ad.ad_type)
-                          )}
+                          {getTypeIcon(ad.ad_type)}
                         </div>
                         <div style={{ minWidth: 0 }}>
                           <p style={{ fontWeight: 500, fontSize: '0.875rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 260, margin: 0 }}>
@@ -223,8 +213,7 @@ export const Ads = () => {
                       </Link>
                     </td>
                   </tr>
-                  );
-                })}
+                ))}
               </motion.tbody>
             </table>
           </div>

@@ -61,8 +61,8 @@ SNAPSHOT_HEADERS = {
 }
 
 # Regex to find signed fbcdn URLs anywhere in raw HTML
-FBCDN_VIDEO_RE = re.compile(r'(https://[^"\'\\]*fbcdn[^"\'\\]+\.(?:mp4|mov)[^"\'\\]*)')
-FBCDN_IMAGE_RE = re.compile(r'(https://[^"\'\\]*scontent[^"\'\\]+\.(?:jpg|jpeg|png|webp)[^"\'\\]*)')
+FBCDN_VIDEO_RE = re.compile(r'(https://scontent[^"\'\\]+\.(?:mp4|mov)[^"\'\\]*)')
+FBCDN_IMAGE_RE = re.compile(r'(https://scontent[^"\'\\]+\.(?:jpg|jpeg|png|webp)[^"\'\\]*)')
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -88,53 +88,6 @@ def _ensure_ad_dir(ad_archive_id: str) -> Path:
 
 
 # ── Core: extract media URLs from snapshot HTML ────────────────────────────────
-
-def _extract_from_serverjs_json(html: str) -> tuple[str | None, str | None]:
-    """
-    Extract media from ServerJS JSON blobs. This is the most reliable method
-    for extracting Meta ad media metadata as it reads the initial hydration state.
-    """
-    image_url = None
-    video_url = None
-
-    # Pattern 1: Find <script type="application/json"> elements usually carrying data-sjs
-    script_matches = re.finditer(r'<script[^>]*type=(?:"|\')application/json(?:"|\')[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
-    for match in script_matches:
-        content = match.group(1).strip()
-        if not content:
-            continue
-        try:
-            data = json.loads(content)
-            v, i = _walk_json_for_media(data)
-            if v and not video_url:
-                video_url = v
-            if i and not image_url:
-                image_url = i
-            if video_url and image_url:
-                return image_url, video_url
-        except (json.JSONDecodeError, RecursionError):
-            continue
-
-    # Pattern 2: Scripts with data-sjs directly
-    sjs_matches = re.finditer(r'<script[^>]*data-sjs[^>]*>(.*?)</script>', html, re.DOTALL | re.IGNORECASE)
-    for match in sjs_matches:
-        content = match.group(1).strip()
-        if not content:
-            continue
-        try:
-            data = json.loads(content)
-            v, i = _walk_json_for_media(data)
-            if v and not video_url:
-                video_url = v
-            if i and not image_url:
-                image_url = i
-            if video_url and image_url:
-                return image_url, video_url
-        except (json.JSONDecodeError, RecursionError):
-            continue
-
-    return image_url, video_url
-
 
 def _extract_from_json_blobs(html: str) -> tuple[str | None, str | None]:
     """
@@ -185,16 +138,16 @@ def _walk_json_for_media(data, depth=0) -> tuple[str | None, str | None]:
 
     if isinstance(data, dict):
         # Direct key hits
-        for vkey in ("playable_url_quality_hd", "video_hd_url", "playable_url", "video_sd_url", "src"):
+        for vkey in ("playable_url_quality_hd", "playable_url", "video_sd_url", "video_hd_url", "src"):
             val = data.get(vkey)
             if isinstance(val, str) and "fbcdn" in val and not video_url:
-                video_url = val.replace("\\/", "/").replace("\\u0025", "%")
+                video_url = val.replace("\\/", "/")
                 break
 
         for ikey in ("image_url", "original_image_url", "resized_image_url", "uri"):
             val = data.get(ikey)
-            if isinstance(val, str) and ("fbcdn" in val or "scontent" in val) and not image_url:
-                image_url = val.replace("\\/", "/").replace("\\u0025", "%")
+            if isinstance(val, str) and "fbcdn" in val and not image_url:
+                image_url = val.replace("\\/", "/")
                 break
 
         if not video_url or not image_url:
@@ -225,10 +178,7 @@ def _extract_from_meta_tags(html: str) -> tuple[str | None, str | None]:
     og:image and og:video are populated server-side — always present
     even without JavaScript. Reliable fallback.
     """
-    try:
-        soup = BeautifulSoup(html, "lxml")
-    except Exception:
-        soup = BeautifulSoup(html, "html.parser")
+    soup = BeautifulSoup(html, "html.parser")
 
     video_url = None
     og_video = soup.find("meta", property="og:video") or soup.find("meta", property="og:video:url")
@@ -282,7 +232,6 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str) -> di
                 timeout=45,
                 follow_redirects=True,
                 headers=SNAPSHOT_HEADERS,
-                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
             ) as client:
                 response = await client.get(snapshot_url)
 
@@ -296,28 +245,16 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str) -> di
 
                 html = response.text
 
-            if len(html) < 20_000:
-                logger.warning("snapshot_html_too_small", ad_id=ad_archive_id, size=len(html))
-                return None
+            # --- Strategy 1: JSON blobs ---
+            image_url, video_url = _extract_from_json_blobs(html)
+            method = "json_blob"
 
-            image_url, video_url = None, None
-            method = "none"
-
-            # --- Strategy 1: ServerJS JSON ---
-            image_url, video_url = _extract_from_serverjs_json(html)
-            method = "serverjs_json"
-
-            # --- Strategy 2: JSON blobs ---
-            if not image_url and not video_url:
-                image_url, video_url = _extract_from_json_blobs(html)
-                method = "json_blob"
-
-            # --- Strategy 3: og meta tags ---
+            # --- Strategy 2: og meta tags ---
             if not image_url and not video_url:
                 image_url, video_url = _extract_from_meta_tags(html)
                 method = "og_meta"
 
-            # --- Strategy 4: regex ---
+            # --- Strategy 3: regex ---
             if not image_url and not video_url:
                 image_url, video_url = _extract_from_regex(html)
                 method = "regex"
@@ -374,11 +311,7 @@ async def download_image(url: str, ad_archive_id: str, filename: str = "image.jp
     output_path = ad_dir / filename
 
     try:
-        async with httpx.AsyncClient(
-            timeout=30, 
-            follow_redirects=True,
-            limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
-        ) as client:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             response = await client.get(url, headers={"User-Agent": SNAPSHOT_HEADERS["User-Agent"]})
             response.raise_for_status()
 
@@ -413,11 +346,7 @@ async def download_video(video_url: str, ad_archive_id: str) -> str | None:
     # Try direct download first (fbcdn URLs are direct MP4s)
     if "fbcdn.net" in video_url or "fbcdn.com" in video_url:
         try:
-            async with httpx.AsyncClient(
-                timeout=120, 
-                follow_redirects=True,
-                limits=httpx.Limits(max_connections=10, max_keepalive_connections=5),
-            ) as client:
+            async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
                 async with client.stream("GET", video_url, headers={"User-Agent": SNAPSHOT_HEADERS["User-Agent"]}) as response:
                     response.raise_for_status()
                     content_type = response.headers.get("content-type", "")
