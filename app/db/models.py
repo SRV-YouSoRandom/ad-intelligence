@@ -130,9 +130,9 @@ class Insight(Base):
     model_used = Column(Text, nullable=False)
     prompt_version = Column(Text, nullable=False, server_default=text("'v1'"))
     analysis_mode = Column(Text, nullable=False, server_default=text("'visual'"))
+    ad_context = Column(Text, nullable=False, server_default=text("'commercial'"))
     generated_at = Column(DateTime(timezone=True), server_default=text("NOW()"))
 
-    # Relationships
     ad = relationship("Ad", back_populates="insight")
 
 

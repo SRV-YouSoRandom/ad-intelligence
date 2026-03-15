@@ -1,4 +1,13 @@
-"""Ad classifier — two-pass: metadata heuristics then VL model fallback."""
+"""
+Ad classifier — three-pass pipeline:
+  Pass 1: publisher_platforms + creative field heuristics (free, reliable)
+  Pass 2: snapshot URL pattern matching (free, fragile)
+  Pass 3: Qwen VL model fallback (paid, accurate)
+
+Political ad context: political ads from parties like BJP often have
+video content embedded in static-looking snapshot pages. The VL model
+is explicitly prompted to handle this ambiguity.
+"""
 
 import json
 
@@ -10,62 +19,110 @@ from app.core.metrics import metrics
 
 logger = get_logger(__name__)
 
-CLASSIFICATION_SYSTEM_PROMPT = """You are a media type classifier for digital advertisements.
+# Platforms that strongly indicate video creative
+VIDEO_PLATFORMS = {"instagram_reels", "facebook_reels", "facebook_stories", "instagram_stories"}
+# Platforms that strongly indicate static creative
+STATIC_PLATFORMS = {"facebook_feed", "instagram_feed", "facebook_marketplace"}
+
+CLASSIFICATION_SYSTEM_PROMPT = """You are a media type classifier for digital advertisements, including both commercial brand ads and political party ads.
+
 Your only job is to determine whether an ad creative is a STATIC image or a VIDEO.
 
 Rules:
-- If the image shows a video player interface, play button overlay, or is clearly a video thumbnail, output VIDEO.
-- If the image is a still photograph, illustration, graphic, or banner with no video indicators, output STATIC.
+- If the image shows a video player interface, play button overlay, timeline scrubber, or is clearly a video thumbnail with duration text, output VIDEO.
+- If the image is a still photograph, illustration, graphic, banner, or poster with no video indicators, output STATIC.
+- Political party ads (BJP, Congress, etc.) often use poster-style graphics with text overlays — these are STATIC unless a video player is visible.
 - Output ONLY a JSON object with a single key. No other text.
 
 Output format:
 {"type": "STATIC"} or {"type": "VIDEO"}"""
 
 
+def _detect_ad_context(ad_raw: dict) -> str:
+    """
+    Detect whether this is a political/social ad or a commercial brand ad.
+    Used to provide context for downstream analysis.
+    Returns: 'political' | 'commercial'
+    """
+    disclaimer = ad_raw.get("disclaimer", "") or ""
+    page_name = ad_raw.get("page_name", "") or ""
+
+    # Meta Ads Library marks political/social issue ads with a disclaimer
+    if disclaimer:
+        return "political"
+
+    # Common political party indicators
+    political_keywords = [
+        "party", "bjp", "congress", "election", "vote", "manifesto",
+        "campaign", "political", "neta", "sarkar", "modi", "rahul",
+    ]
+    combined = (page_name + disclaimer).lower()
+    if any(kw in combined for kw in political_keywords):
+        return "political"
+
+    return "commercial"
+
+
 def classify_from_metadata(ad_raw: dict) -> tuple[str, str] | None:
     """
-    Pass 1: Classify ad type from metadata heuristics (free, no API call).
+    Pass 1 & 2: Classify from metadata signals, strongest first.
 
-    Since we no longer request ad_creatives{...} (not supported by /ads_archive),
-    we classify from the snapshot URL pattern and any available flat fields.
+    Signal priority (descending reliability):
+    1. publisher_platforms — most reliable signal
+    2. Video-specific flat fields presence
+    3. Snapshot URL pattern
+    4. Caption/body text presence (weak signal for STATIC)
 
-    Returns:
-        Tuple of (ad_type, method) or None if uncertain.
+    Returns: (ad_type, method) or None if uncertain
     """
-    # Check flat creative fields available from the Ads Library API
-    # These are top-level fields, not nested under ad_creatives
-    bodies = ad_raw.get("ad_creative_bodies") or []
-    link_titles = ad_raw.get("ad_creative_link_titles") or []
-    snapshot_url = ad_raw.get("ad_snapshot_url", "")
+    platforms = set(ad_raw.get("publisher_platforms") or [])
 
-    # The snapshot URL for video ads often contains 'video' in the path
-    # This is a heuristic — not 100% reliable but catches the common cases
-    if snapshot_url and "video" in snapshot_url.lower():
+    # --- Pass 1: publisher_platforms ---
+    video_overlap = platforms & VIDEO_PLATFORMS
+    static_overlap = platforms & STATIC_PLATFORMS
+
+    if video_overlap and not static_overlap:
+        logger.debug("classify_video_by_platforms", platforms=list(video_overlap))
+        return ("VIDEO", "metadata_platforms")
+
+    if static_overlap and not video_overlap:
+        # Still need to check other signals — static platforms can also run video
+        # but if exclusively on feed with no story/reels, very likely static
+        bodies = ad_raw.get("ad_creative_bodies") or []
+        link_titles = ad_raw.get("ad_creative_link_titles") or []
+        if bodies or link_titles:
+            logger.debug("classify_static_by_platforms_and_text")
+            return ("STATIC", "metadata_platforms_text")
+
+    # Mixed platforms (both feed and stories/reels) — inconclusive from platforms alone
+
+    # --- Pass 2: snapshot URL pattern ---
+    snapshot_url = ad_raw.get("ad_snapshot_url", "") or ""
+    if "video" in snapshot_url.lower():
         return ("VIDEO", "metadata_url_hint")
 
-    # If we have bodies or link titles, it's likely a static ad
-    # (video ads tend to have minimal text in the flat fields)
-    # This is a weak signal — we'll let the VL model handle uncertain cases
-    if bodies or link_titles:
-        # Default to STATIC for text-bearing ads; VL model refines if wrong
+    # --- Weak STATIC signal: has substantial copy text ---
+    bodies = ad_raw.get("ad_creative_bodies") or []
+    link_titles = ad_raw.get("ad_creative_link_titles") or []
+    link_descs = ad_raw.get("ad_creative_link_descriptions") or []
+
+    # Political ads with no link titles but rich body copy are typically poster/static
+    if bodies and not link_titles and not link_descs:
+        context = _detect_ad_context(ad_raw)
+        if context == "political":
+            return ("STATIC", "metadata_political_poster_heuristic")
+
+    # Commercial ads with link titles = almost always static
+    if link_titles:
         return ("STATIC", "metadata_text_hint")
 
-    return None  # No signal — fall through to Pass 2
+    return None  # Fall through to VL model
 
 
 async def classify_with_vl_model(snapshot_url: str) -> tuple[str, str]:
     """
-    Pass 2: Use Qwen VL-30B to visually classify from snapshot URL.
-
-    The ad_snapshot_url is a Meta-hosted preview page. We pass it directly
-    as an image URL to the VL model — OpenRouter will attempt to fetch it.
-    If the URL is inaccessible, falls back to UNKNOWN.
-
-    Args:
-        snapshot_url: Meta ad snapshot URL.
-
-    Returns:
-        Tuple of (ad_type, method).
+    Pass 3: Use Qwen VL-30B to visually classify from snapshot URL.
+    Falls back to UNKNOWN on any failure.
     """
     try:
         payload = {
@@ -106,8 +163,7 @@ async def classify_with_vl_model(snapshot_url: str) -> tuple[str, str]:
             if ad_type in ("STATIC", "VIDEO"):
                 metrics.increment("classification_vl_model")
                 return (ad_type, "vl_model")
-            else:
-                return ("UNKNOWN", "vl_model")
+            return ("UNKNOWN", "vl_model")
 
     except Exception as exc:
         logger.error("classification_vl_error", error=str(exc))
@@ -116,22 +172,17 @@ async def classify_with_vl_model(snapshot_url: str) -> tuple[str, str]:
 
 async def classify_ad(ad_raw: dict) -> tuple[str, str]:
     """
-    Full two-pass classification pipeline.
-
-    Returns:
-        Tuple of (ad_type, classification_method).
+    Full three-pass classification pipeline.
+    Returns: (ad_type, classification_method)
     """
-    # Pass 1: Metadata heuristics
     result = classify_from_metadata(ad_raw)
     if result:
         metrics.increment("classification_metadata")
         return result
 
-    # Pass 2: VL model using snapshot URL
     snapshot_url = ad_raw.get("ad_snapshot_url")
     if snapshot_url:
         return await classify_with_vl_model(snapshot_url)
 
-    # No signal at all
     logger.warning("classification_no_signal", ad_id=ad_raw.get("ad_archive_id") or ad_raw.get("id"))
     return ("UNKNOWN", "fallback")

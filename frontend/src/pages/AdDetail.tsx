@@ -7,34 +7,35 @@ import {
   Sparkles, Loader2, ArrowLeft, Trash2, ExternalLink,
   TrendingUp, TrendingDown, Minus, CheckCircle2, AlertCircle,
   Info, Eye, Type, Palette, Users, MousePointerClick,
-  LayoutTemplate, Lightbulb, Video, Zap, Clock,
+  LayoutTemplate, Lightbulb, Video, Zap, Clock, Flag, Megaphone,
+  Image as ImageIcon,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 // ── Category metadata ─────────────────────────────────────────────────────────
 
 const CATEGORY_META: Record<string, { label: string; icon: React.ReactNode; color: string }> = {
-  composition:            { label: 'Composition',        icon: <LayoutTemplate size={13} />,     color: '#7c3aed' },
-  cta:                    { label: 'Call to Action',      icon: <MousePointerClick size={13} />,  color: '#0369a1' },
-  copy:                   { label: 'Copy',                icon: <Type size={13} />,               color: '#0369a1' },
-  color_contrast:         { label: 'Color & Contrast',   icon: <Palette size={13} />,            color: '#9333ea' },
-  product_visibility:     { label: 'Product Visibility', icon: <Eye size={13} />,                color: '#0891b2' },
-  human_presence:         { label: 'Human Presence',     icon: <Users size={13} />,              color: '#0369a1' },
-  emotional_tone:         { label: 'Emotional Tone',     icon: <Zap size={13} />,               color: '#7c3aed' },
-  hook_strength:          { label: 'Hook Strength',      icon: <Zap size={13} />,               color: '#dc2626' },
-  pacing:                 { label: 'Pacing',             icon: <Clock size={13} />,              color: '#0369a1' },
-  text_overlay_quality:   { label: 'Text Overlays',      icon: <Type size={13} />,               color: '#0369a1' },
-  cta_placement:          { label: 'CTA Placement',      icon: <MousePointerClick size={13} />,  color: '#0891b2' },
+  composition:              { label: 'Composition',        icon: <LayoutTemplate size={13} />,    color: '#7c3aed' },
+  cta:                      { label: 'Call to Action',     icon: <MousePointerClick size={13} />, color: '#0369a1' },
+  copy:                     { label: 'Copy',               icon: <Type size={13} />,              color: '#0369a1' },
+  color_contrast:           { label: 'Color & Contrast',  icon: <Palette size={13} />,           color: '#9333ea' },
+  product_visibility:       { label: 'Product Visibility',icon: <Eye size={13} />,               color: '#0891b2' },
+  message_clarity:          { label: 'Message Clarity',   icon: <Eye size={13} />,               color: '#0891b2' },
+  human_presence:           { label: 'Human Presence',    icon: <Users size={13} />,             color: '#0369a1' },
+  emotional_tone:           { label: 'Emotional Tone',    icon: <Zap size={13} />,              color: '#7c3aed' },
+  hook_strength:            { label: 'Hook Strength',     icon: <Zap size={13} />,              color: '#dc2626' },
+  pacing:                   { label: 'Pacing',            icon: <Clock size={13} />,             color: '#0369a1' },
+  text_overlay_quality:     { label: 'Text Overlays',     icon: <Type size={13} />,              color: '#0369a1' },
+  cta_placement:            { label: 'CTA Placement',     icon: <MousePointerClick size={13} />, color: '#0891b2' },
   scene_transition_quality: { label: 'Scene Transitions', icon: <Video size={13} />,             color: '#7c3aed' },
-  hook_strength_video:    { label: 'Hook Strength',      icon: <Zap size={13} />,               color: '#dc2626' },
-  copy_clarity:           { label: 'Copy Clarity',       icon: <Type size={13} />,               color: '#0369a1' },
-  offer_clarity:          { label: 'Offer Clarity',      icon: <CheckCircle2 size={13} />,       color: '#059669' },
-  audience_signal:        { label: 'Audience Signal',    icon: <Users size={13} />,              color: '#0369a1' },
-  cta_specificity:        { label: 'CTA Specificity',    icon: <MousePointerClick size={13} />,  color: '#0891b2' },
-  tone_authenticity:      { label: 'Tone',               icon: <Zap size={13} />,               color: '#7c3aed' },
-  length_fit:             { label: 'Length',             icon: <Type size={13} />,               color: '#0369a1' },
-  urgency_and_proof:      { label: 'Urgency & Proof',    icon: <AlertCircle size={13} />,        color: '#d97706' },
-  recommendation:         { label: 'Next Test',          icon: <Lightbulb size={13} />,          color: '#059669' },
+  offer_clarity:            { label: 'Offer Clarity',     icon: <CheckCircle2 size={13} />,      color: '#059669' },
+  message_visibility:       { label: 'Message Visibility',icon: <Eye size={13} />,               color: '#0891b2' },
+  audience_signal:          { label: 'Audience Signal',   icon: <Users size={13} />,             color: '#0369a1' },
+  cta_specificity:          { label: 'CTA Specificity',   icon: <MousePointerClick size={13} />, color: '#0891b2' },
+  tone_authenticity:        { label: 'Tone',              icon: <Zap size={13} />,              color: '#7c3aed' },
+  length_fit:               { label: 'Length',            icon: <Type size={13} />,              color: '#0369a1' },
+  urgency_and_proof:        { label: 'Urgency & Proof',   icon: <AlertCircle size={13} />,       color: '#d97706' },
+  recommendation:           { label: 'Next Test',         icon: <Lightbulb size={13} />,         color: '#059669' },
 };
 
 const getCategoryMeta = (cat: string) =>
@@ -43,39 +44,13 @@ const getCategoryMeta = (cat: string) =>
 // ── Impact config ─────────────────────────────────────────────────────────────
 
 const IMPACT_CONFIG = {
-  positive: {
-    icon: <TrendingUp size={14} />,
-    label: 'Positive',
-    bg: '#f0fdf4',
-    border: '#86efac',
-    text: '#15803d',
-    badgeBg: '#dcfce7',
-    badgeText: '#166534',
-  },
-  negative: {
-    icon: <TrendingDown size={14} />,
-    label: 'Negative',
-    bg: '#fff7ed',
-    border: '#fed7aa',
-    text: '#c2410c',
-    badgeBg: '#ffedd5',
-    badgeText: '#9a3412',
-  },
-  neutral: {
-    icon: <Minus size={14} />,
-    label: 'Neutral',
-    bg: '#f8fafc',
-    border: '#e2e8f0',
-    text: '#475569',
-    badgeBg: '#f1f5f9',
-    badgeText: '#475569',
-  },
+  positive: { icon: <TrendingUp size={14} />, label: 'Positive', bg: '#f0fdf4', border: '#86efac', text: '#15803d', badgeBg: '#dcfce7', badgeText: '#166534' },
+  negative: { icon: <TrendingDown size={14} />, label: 'Negative', bg: '#fff7ed', border: '#fed7aa', text: '#c2410c', badgeBg: '#ffedd5', badgeText: '#9a3412' },
+  neutral:  { icon: <Minus size={14} />, label: 'Neutral', bg: '#f8fafc', border: '#e2e8f0', text: '#475569', badgeBg: '#f1f5f9', badgeText: '#475569' },
 };
 
 const getImpact = (impact: string) =>
   IMPACT_CONFIG[impact as keyof typeof IMPACT_CONFIG] ?? IMPACT_CONFIG.neutral;
-
-// ── Confidence dot ────────────────────────────────────────────────────────────
 
 const ConfidenceDots = ({ level }: { level: string }) => {
   const filled = level === 'high' ? 3 : level === 'medium' ? 2 : 1;
@@ -83,53 +58,91 @@ const ConfidenceDots = ({ level }: { level: string }) => {
   return (
     <div style={{ display: 'flex', gap: '3px', alignItems: 'center' }}>
       {[1, 2, 3].map(i => (
-        <div key={i} style={{
-          width: 6, height: 6, borderRadius: '50%',
-          backgroundColor: i <= filled ? color : '#e5e7eb',
-        }} />
+        <div key={i} style={{ width: 6, height: 6, borderRadius: '50%', backgroundColor: i <= filled ? color : '#e5e7eb' }} />
       ))}
       <span style={{ fontSize: '0.7rem', color: '#9ca3af', marginLeft: 2 }}>{level}</span>
     </div>
   );
 };
 
+// ── Snapshot preview ──────────────────────────────────────────────────────────
+
+const SnapshotPreview = ({ snapshotUrl, mediaLocalPath }: { snapshotUrl?: string; mediaLocalPath?: string }) => {
+  const [imgError, setImgError] = useState(false);
+
+  // Try to show the locally stored image first (served via API)
+  // Fall back to snapshot URL as iframe, fall back to link-only
+  const localImgUrl = mediaLocalPath
+    ? `${import.meta.env.VITE_API_URL?.replace('/api/v1', '')}/media/${mediaLocalPath.split('/media_storage/').pop()}`
+    : null;
+
+  if (localImgUrl && !imgError) {
+    return (
+      <div style={{ marginBottom: 'var(--space-4)' }}>
+        <img
+          src={localImgUrl}
+          alt="Ad creative"
+          onError={() => setImgError(true)}
+          style={{
+            width: '100%', borderRadius: 8, border: '1px solid var(--border-subtle)',
+            objectFit: 'contain', maxHeight: 280, backgroundColor: 'var(--bg-surface-hover)',
+          }}
+        />
+      </div>
+    );
+  }
+
+  if (snapshotUrl) {
+    return (
+      <div style={{ marginBottom: 'var(--space-4)' }}>
+        <a
+          href={snapshotUrl}
+          target="_blank"
+          rel="noreferrer"
+          style={{
+            display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+            width: '100%', minHeight: 120, borderRadius: 8,
+            border: '1.5px dashed var(--border-subtle)', backgroundColor: 'var(--bg-surface-hover)',
+            color: 'var(--text-secondary)', gap: 8, textDecoration: 'none',
+            transition: 'all var(--transition-fast)',
+          }}
+          onMouseEnter={e => { e.currentTarget.style.backgroundColor = '#f0f5ff'; e.currentTarget.style.borderColor = 'var(--status-info-text)'; }}
+          onMouseLeave={e => { e.currentTarget.style.backgroundColor = 'var(--bg-surface-hover)'; e.currentTarget.style.borderColor = 'var(--border-subtle)'; }}
+        >
+          <ImageIcon size={24} style={{ opacity: 0.4 }} />
+          <span style={{ fontSize: '0.8rem', fontWeight: 500 }}>View creative in Meta Library</span>
+          <span style={{ fontSize: '0.72rem', opacity: 0.6 }}>Opens in new tab</span>
+          <ExternalLink size={12} style={{ position: 'absolute', top: 8, right: 8, opacity: 0.4 }} />
+        </a>
+      </div>
+    );
+  }
+
+  return null;
+};
+
 // ── Factor Card ───────────────────────────────────────────────────────────────
 
-const FactorCard = ({ factor }: { factor: { trait: string; category: string; impact: string; confidence: string; evidence: string } }) => {
+type Factor = { trait: string; category: string; impact: string; confidence: string; evidence: string };
+
+const FactorCard = ({ factor }: { factor: Factor }) => {
   const impact = getImpact(factor.impact);
   const catMeta = getCategoryMeta(factor.category);
   const isRecommendation = factor.category === 'recommendation';
 
   if (isRecommendation) {
     return (
-      <motion.div
-        initial={{ opacity: 0, y: 6 }}
-        animate={{ opacity: 1, y: 0 }}
-        style={{
-          padding: '14px 16px',
-          borderRadius: 10,
-          border: '1.5px solid #a7f3d0',
-          backgroundColor: '#f0fdf4',
-          marginTop: 4,
-        }}
-      >
+      <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
+        style={{ padding: '14px 16px', borderRadius: 10, border: '1.5px solid #a7f3d0', backgroundColor: '#f0fdf4', marginTop: 4 }}>
         <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-          <div style={{
-            width: 30, height: 30, borderRadius: 8, flexShrink: 0,
-            backgroundColor: '#dcfce7', display: 'flex', alignItems: 'center', justifyContent: 'center',
-            color: '#059669',
-          }}>
+          <div style={{ width: 30, height: 30, borderRadius: 8, flexShrink: 0, backgroundColor: '#dcfce7', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#059669' }}>
             <Lightbulb size={15} />
           </div>
           <div style={{ flex: 1 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 6, flexWrap: 'wrap', gap: 4 }}>
-              <span style={{ fontWeight: 700, fontSize: '0.8rem', color: '#065f46', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                Recommended Next Test
-              </span>
+            <div style={{ fontWeight: 700, fontSize: '0.8rem', color: '#065f46', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>
+              Recommended Next Test
             </div>
-            <p style={{ fontSize: '0.875rem', lineHeight: 1.65, color: '#064e3b', margin: 0 }}>
-              {factor.evidence}
-            </p>
+            <p style={{ fontSize: '0.875rem', lineHeight: 1.65, color: '#064e3b', margin: 0 }}>{factor.evidence}</p>
           </div>
         </div>
       </motion.div>
@@ -137,66 +150,30 @@ const FactorCard = ({ factor }: { factor: { trait: string; category: string; imp
   }
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 6 }}
-      animate={{ opacity: 1, y: 0 }}
-      style={{
-        padding: '14px 16px',
-        borderRadius: 10,
-        border: `1.5px solid ${impact.border}`,
-        backgroundColor: impact.bg,
-      }}
-    >
+    <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }}
+      style={{ padding: '14px 16px', borderRadius: 10, border: `1.5px solid ${impact.border}`, backgroundColor: impact.bg }}>
       <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-        {/* Impact icon column */}
-        <div style={{
-          width: 30, height: 30, borderRadius: 8, flexShrink: 0,
-          backgroundColor: impact.badgeBg,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          color: impact.text,
-        }}>
+        <div style={{ width: 30, height: 30, borderRadius: 8, flexShrink: 0, backgroundColor: impact.badgeBg, display: 'flex', alignItems: 'center', justifyContent: 'center', color: impact.text }}>
           {impact.icon}
         </div>
-
         <div style={{ flex: 1, minWidth: 0 }}>
-          {/* Header row */}
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, flexWrap: 'wrap', gap: 6 }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-              {/* Trait name */}
               <span style={{ fontWeight: 600, fontSize: '0.875rem', color: '#111827', textTransform: 'capitalize' }}>
                 {factor.trait.replace(/_/g, ' ')}
               </span>
-              {/* Category pill */}
-              <span style={{
-                display: 'inline-flex', alignItems: 'center', gap: 3,
-                padding: '2px 7px', borderRadius: 999, fontSize: '0.7rem', fontWeight: 500,
-                backgroundColor: `${catMeta.color}18`, color: catMeta.color,
-                border: `1px solid ${catMeta.color}30`,
-              }}>
-                {catMeta.icon}
-                {catMeta.label}
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, padding: '2px 7px', borderRadius: 999, fontSize: '0.7rem', fontWeight: 500, backgroundColor: `${catMeta.color}18`, color: catMeta.color, border: `1px solid ${catMeta.color}30` }}>
+                {catMeta.icon} {catMeta.label}
               </span>
             </div>
-
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              {/* Impact badge */}
-              <span style={{
-                display: 'inline-flex', alignItems: 'center', gap: 4,
-                padding: '2px 8px', borderRadius: 999, fontSize: '0.7rem', fontWeight: 600,
-                backgroundColor: impact.badgeBg, color: impact.text,
-              }}>
-                {impact.icon}
-                {impact.label}
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4, padding: '2px 8px', borderRadius: 999, fontSize: '0.7rem', fontWeight: 600, backgroundColor: impact.badgeBg, color: impact.text }}>
+                {impact.icon} {impact.label}
               </span>
-              {/* Confidence dots */}
               <ConfidenceDots level={factor.confidence} />
             </div>
           </div>
-
-          {/* Evidence */}
-          <p style={{ fontSize: '0.875rem', lineHeight: 1.65, color: '#374151', margin: 0 }}>
-            {factor.evidence}
-          </p>
+          <p style={{ fontSize: '0.875rem', lineHeight: 1.65, color: '#374151', margin: 0 }}>{factor.evidence}</p>
         </div>
       </div>
     </motion.div>
@@ -231,14 +208,13 @@ export const AdDetail = () => {
     try {
       const res = await generateInsight(id);
       setActiveJobId(res.job_id);
-    } catch {
-      alert('Failed to start generation. Make sure the ad is scored first.');
+    } catch (err) {
+      alert('Failed to start generation: ' + (err instanceof Error ? err.message : 'Unknown error'));
     }
   };
 
   const handleDelete = async () => {
-    if (!id) return;
-    if (!confirm('Delete this insight?')) return;
+    if (!id || !confirm('Delete this insight?')) return;
     try {
       await deleteInsight(id);
       mutateInsight();
@@ -248,13 +224,8 @@ export const AdDetail = () => {
   };
 
   if (adLoading) {
-    return (
-      <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-12)' }}>
-        <Loader2 className="spinner text-muted" size={32} />
-      </div>
-    );
+    return <div style={{ display: 'flex', justifyContent: 'center', padding: 'var(--space-12)' }}><Loader2 className="spinner text-muted" size={32} /></div>;
   }
-
   if (!ad) {
     return (
       <div style={{ padding: 'var(--space-8)' }}>
@@ -268,13 +239,12 @@ export const AdDetail = () => {
   const isPending = isPolling || insight?.status === 'pending';
   const showNotGenerated = !hasInsight && !isPending && !insightLoading;
 
-  // Separate recommendation from regular factors
-  const regularFactors = (insight?.factors ?? []).filter((f: { category: string }) => f.category !== 'recommendation');
-  const recommendationFactor = (insight?.factors ?? []).find((f: { category: string }) => f.category === 'recommendation');
+  const regularFactors = (insight?.factors ?? []).filter((f: Factor) => f.category !== 'recommendation');
+  const recommendationFactor = (insight?.factors ?? []).find((f: Factor) => f.category === 'recommendation');
+  const positiveCount = regularFactors.filter((f: Factor) => f.impact === 'positive').length;
+  const negativeCount = regularFactors.filter((f: Factor) => f.impact === 'negative').length;
 
-  // Impact summary counts
-  const positiveCount = regularFactors.filter((f: { impact: string }) => f.impact === 'positive').length;
-  const negativeCount = regularFactors.filter((f: { impact: string }) => f.impact === 'negative').length;
+  const isPolitic = insight?.ad_context === 'political';
 
   return (
     <div style={{ maxWidth: 960, margin: '0 auto' }}>
@@ -286,15 +256,16 @@ export const AdDetail = () => {
 
       <div style={{ display: 'flex', gap: 'var(--space-6)', flexWrap: 'wrap', alignItems: 'flex-start' }}>
 
-        {/* ── Left panel: Ad meta ── */}
+        {/* ── Left: Ad meta ── */}
         <div style={{ flex: '0 0 300px', minWidth: 280 }}>
           <div className="card" style={{ padding: 'var(--space-6)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 'var(--space-4)' }}>
               <h2 style={{ fontSize: '1rem', margin: 0 }}>Creative Details</h2>
-              <Badge variant={ad.is_active ? 'success' : 'neutral'}>
-                {ad.is_active ? 'Active' : 'Inactive'}
-              </Badge>
+              <Badge variant={ad.is_active ? 'success' : 'neutral'}>{ad.is_active ? 'Active' : 'Inactive'}</Badge>
             </div>
+
+            {/* Snapshot preview — new */}
+            <SnapshotPreview snapshotUrl={ad.snapshot_url} mediaLocalPath={ad.media_local_path} />
 
             {ad.snapshot_url && (
               <a href={ad.snapshot_url} target="_blank" rel="noreferrer"
@@ -317,7 +288,13 @@ export const AdDetail = () => {
                   label: 'Est. Impressions',
                   value: ad.impressions_mid
                     ? `~${Intl.NumberFormat('en-US').format(ad.impressions_mid)}`
-                    : <span style={{ color: 'var(--text-tertiary)' }}>No data</span>
+                    : <span style={{ color: 'var(--text-tertiary)' }}>No data</span>,
+                },
+                {
+                  label: 'Imp. Range',
+                  value: (ad.impressions_lower && ad.impressions_upper)
+                    ? `${Intl.NumberFormat('en-US').format(ad.impressions_lower)} – ${Intl.NumberFormat('en-US').format(ad.impressions_upper)}`
+                    : <span style={{ color: 'var(--text-tertiary)' }}>—</span>,
                 },
               ].map(({ label, value }) => (
                 <div key={label} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -339,21 +316,19 @@ export const AdDetail = () => {
           </div>
         </div>
 
-        {/* ── Right panel: Insights ── */}
+        {/* ── Right: Insights ── */}
         <div style={{ flex: 1, minWidth: 340 }}>
           <AnimatePresence mode="wait">
 
             {showNotGenerated && (
-              <motion.div key="not_generated"
-                initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}
-                className="card"
-                style={{ padding: 'var(--space-12)', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', minHeight: 320 }}>
+              <motion.div key="not_generated" initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}
+                className="card" style={{ padding: 'var(--space-12)', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', minHeight: 320 }}>
                 <div style={{ width: 52, height: 52, borderRadius: 14, backgroundColor: 'var(--status-info-bg)', display: 'flex', alignItems: 'center', justifyContent: 'center', marginBottom: 'var(--space-5)' }}>
                   <Sparkles size={24} color="var(--status-info-text)" />
                 </div>
                 <h3 style={{ marginBottom: 8 }}>Generate Creative Insights</h3>
                 <p className="text-muted text-sm" style={{ marginBottom: 'var(--space-6)', maxWidth: 280, lineHeight: 1.6 }}>
-                  AI analysis of the creative elements that drove this ad's performance, including a specific recommendation to test next.
+                  AI analysis of the creative elements that drove this ad's performance. Supports both commercial and political ad formats.
                 </p>
                 <Button variant="primary" size="lg" onClick={handleGenerate} icon={<Sparkles size={16} />}>
                   Generate Report
@@ -362,23 +337,18 @@ export const AdDetail = () => {
             )}
 
             {isPending && (
-              <motion.div key="pending"
-                initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}
-                className="card"
-                style={{ padding: 'var(--space-12)', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', minHeight: 320 }}>
+              <motion.div key="pending" initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0 }}
+                className="card" style={{ padding: 'var(--space-12)', textAlign: 'center', display: 'flex', flexDirection: 'column', alignItems: 'center', minHeight: 320 }}>
                 <Loader2 size={36} className="spinner" color="var(--status-info-text)" style={{ marginBottom: 'var(--space-5)' }} />
                 <h3 style={{ marginBottom: 8 }}>Analyzing Creative</h3>
                 <p className="text-muted text-sm" style={{ lineHeight: 1.6 }}>
-                  The AI is analyzing visual composition, copy, and performance signals. This usually takes 20–40 seconds.
+                  The AI is analyzing visual composition, copy, and performance signals. Usually takes 20–40 seconds.
                 </p>
               </motion.div>
             )}
 
             {hasInsight && (
-              <motion.div key="insight"
-                initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
-                className="card"
-              >
+              <motion.div key="insight" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="card">
                 {/* Header */}
                 <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
@@ -387,13 +357,15 @@ export const AdDetail = () => {
                     </div>
                     <div>
                       <div style={{ fontWeight: 600, fontSize: '0.9rem' }}>AI Strategy Report</div>
-                      <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: 1 }}>
-                        {insight.analysis_mode === 'visual' ? '📸 Visual + Copy analysis' : '📝 Copy-only analysis'}
+                      <div style={{ fontSize: '0.72rem', color: 'var(--text-secondary)', marginTop: 1, display: 'flex', alignItems: 'center', gap: 6 }}>
+                        {insight.analysis_mode === 'visual' ? '📸 Visual + Copy' : '📝 Copy-only'}
+                        {isPolitic
+                          ? <><Flag size={10} color="#a16207" /><span style={{ color: '#a16207' }}>Political ad</span></>
+                          : <><Megaphone size={10} /><span>Commercial ad</span></>}
                       </div>
                     </div>
                   </div>
                   <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                    {/* Impact summary */}
                     {(positiveCount > 0 || negativeCount > 0) && (
                       <div style={{ display: 'flex', gap: 6 }}>
                         {positiveCount > 0 && (
@@ -414,44 +386,39 @@ export const AdDetail = () => {
                   </div>
                 </div>
 
+                {/* Political disclaimer */}
+                {isPolitic && (
+                  <div style={{ margin: '0 20px', marginTop: 16, padding: '10px 14px', backgroundColor: '#fefce8', border: '1px solid #fde68a', borderRadius: 8, fontSize: '0.8rem', color: '#92400e', lineHeight: 1.5 }}>
+                    <strong>Political ad context:</strong> This analysis accounts for political communication norms — reach breadth, message resonance, and authority signaling — rather than applying commercial conversion metrics.
+                  </div>
+                )}
+
                 <div style={{ padding: '20px' }}>
                   {/* Summary */}
                   <div style={{ marginBottom: 20, padding: '14px 16px', backgroundColor: 'var(--bg-surface-hover)', borderRadius: 10, borderLeft: '3px solid var(--status-info-text)' }}>
-                    <p style={{ fontSize: '0.875rem', lineHeight: 1.75, color: 'var(--text-primary)', margin: 0 }}>
-                      {insight.summary}
-                    </p>
+                    <p style={{ fontSize: '0.875rem', lineHeight: 1.75, color: 'var(--text-primary)', margin: 0 }}>{insight.summary}</p>
                   </div>
 
-                  {/* Section label */}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12 }}>
-                    <span style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--text-secondary)' }}>
-                      Analysis Factors
-                    </span>
+                    <span style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--text-secondary)' }}>Analysis Factors</span>
                     <div style={{ flex: 1, height: 1, backgroundColor: 'var(--border-subtle)' }} />
                     <span style={{ fontSize: '0.7rem', color: 'var(--text-tertiary)' }}>{regularFactors.length} factors</span>
                   </div>
 
-                  {/* Factor cards */}
                   <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                    {regularFactors.map((f: { trait: string; category: string; impact: string; confidence: string; evidence: string }, i: number) => (
-                      <FactorCard key={i} factor={f} />
-                    ))}
+                    {regularFactors.map((f: Factor, i: number) => <FactorCard key={i} factor={f} />)}
                   </div>
 
-                  {/* Recommendation */}
                   {recommendationFactor && (
                     <>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, margin: '18px 0 10px' }}>
-                        <span style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--text-secondary)' }}>
-                          What to Test Next
-                        </span>
+                        <span style={{ fontSize: '0.7rem', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.07em', color: 'var(--text-secondary)' }}>What to Test Next</span>
                         <div style={{ flex: 1, height: 1, backgroundColor: 'var(--border-subtle)' }} />
                       </div>
                       <FactorCard factor={recommendationFactor} />
                     </>
                   )}
 
-                  {/* Footer meta */}
                   <div style={{ marginTop: 16, paddingTop: 14, borderTop: '1px solid var(--border-subtle)', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                     <span style={{ fontSize: '0.7rem', color: 'var(--text-tertiary)' }}>
                       {insight.model_used?.split('/').pop()} · v{insight.prompt_version}
@@ -466,7 +433,6 @@ export const AdDetail = () => {
 
           </AnimatePresence>
         </div>
-
       </div>
     </div>
   );
