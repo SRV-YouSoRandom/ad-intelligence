@@ -1,29 +1,17 @@
 """SQLAlchemy ORM models for the Ad Intelligence platform."""
 
 import uuid
-from datetime import date, datetime
+from datetime import datetime
 
 from sqlalchemy import (
-    BigInteger,
-    Boolean,
-    CheckConstraint,
-    Column,
-    Computed,
-    Date,
-    DateTime,
-    ForeignKey,
-    Index,
-    Numeric,
-    String,
-    Text,
-    text,
+    BigInteger, Boolean, CheckConstraint, Column, Computed,
+    Date, DateTime, ForeignKey, Index, Numeric, Text, text,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, relationship
 
 
 class Base(DeclarativeBase):
-    """Base class for all ORM models."""
     pass
 
 
@@ -37,7 +25,6 @@ class Brand(Base):
     ad_count = Column(BigInteger, default=0, server_default=text("0"))
     created_at = Column(DateTime(timezone=True), server_default=text("NOW()"))
 
-    # Relationships
     ads = relationship("Ad", back_populates="brand", cascade="all, delete-orphan")
 
 
@@ -49,17 +36,25 @@ class Ad(Base):
     brand_id = Column(UUID(as_uuid=True), ForeignKey("brands.id", ondelete="CASCADE"), nullable=True)
     page_name = Column(Text, nullable=True)
     is_active = Column(Boolean, nullable=False)
+
+    # Creative type classification (STATIC / VIDEO / UNKNOWN)
     ad_type = Column(Text, nullable=True)
     classification_method = Column(Text, nullable=True)
+
+    # Ad copy content
     caption = Column(Text, nullable=True)
     link_title = Column(Text, nullable=True)
     link_description = Column(Text, nullable=True)
     cta_type = Column(Text, nullable=True)
+
+    # Delivery metadata
     publisher_platforms = Column(ARRAY(Text), nullable=True)
+    languages = Column(ARRAY(Text), nullable=True)
     start_date = Column(Date, nullable=True)
     end_date = Column(Date, nullable=True)
+    currency = Column(Text, nullable=True)
 
-    # Impression range fields
+    # ── Performance metrics (EU + political ads only) ──────────────────────────
     impressions_lower = Column(BigInteger, nullable=True)
     impressions_upper = Column(BigInteger, nullable=True)
     impressions_mid = Column(
@@ -71,7 +66,6 @@ class Ad(Base):
         ),
     )
 
-    # Reach range fields
     reach_lower = Column(BigInteger, nullable=True)
     reach_upper = Column(BigInteger, nullable=True)
     reach_mid = Column(
@@ -83,29 +77,41 @@ class Ad(Base):
         ),
     )
 
-    # Spend range fields
     spend_lower = Column(Numeric, nullable=True)
     spend_upper = Column(Numeric, nullable=True)
 
-    # Media
+    # Estimated audience size (different from reach — pre-delivery estimate)
+    estimated_audience_lower = Column(BigInteger, nullable=True)
+    estimated_audience_upper = Column(BigInteger, nullable=True)
+
+    # ── Political / issue ad fields ────────────────────────────────────────────
+    # disclaimer: "Paid for by X" — PRESENCE = Meta-verified political/issue ad
+    # This is the authoritative classification signal, not a heuristic.
+    disclaimer = Column(Text, nullable=True)
+    bylines = Column(Text, nullable=True)
+    beneficiary_payers = Column(JSONB, nullable=True)  # EU: {beneficiary, payer}
+
+    # ── Demographic & geographic breakdowns (political + EU) ───────────────────
+    demographic_distribution = Column(JSONB, nullable=True)  # age/gender %
+    delivery_by_region = Column(JSONB, nullable=True)        # region-level reach
+
+    # ── Media ─────────────────────────────────────────────────────────────────
     snapshot_url = Column(Text, nullable=True)
     media_local_path = Column(Text, nullable=True)
     frame_paths = Column(ARRAY(Text), nullable=True)
     frame_metadata = Column(JSONB, nullable=True)
 
-    # Performance scoring
+    # ── Performance scoring ───────────────────────────────────────────────────
     performance_score = Column(Numeric(5, 4), nullable=True)
     performance_label = Column(Text, nullable=True)
     performance_percentile = Column(Numeric(5, 2), nullable=True)
 
-    # Raw API data
+    # ── Raw API response ──────────────────────────────────────────────────────
     raw_meta_json = Column(JSONB, nullable=True)
 
-    # Timestamps
     created_at = Column(DateTime(timezone=True), server_default=text("NOW()"))
     updated_at = Column(DateTime(timezone=True), server_default=text("NOW()"), onupdate=datetime.utcnow)
 
-    # Constraints
     __table_args__ = (
         CheckConstraint("ad_type IN ('STATIC', 'VIDEO', 'UNKNOWN')", name="ck_ads_ad_type"),
         CheckConstraint("performance_label IN ('STRONG', 'AVERAGE', 'WEAK')", name="ck_ads_performance_label"),
@@ -113,9 +119,10 @@ class Ad(Base):
         Index("idx_ads_is_active", "is_active"),
         Index("idx_ads_ad_type", "ad_type"),
         Index("idx_ads_performance_label", "performance_label"),
+        # Partial index — fast filter for political ads
+        Index("idx_ads_disclaimer", "disclaimer", postgresql_where=text("disclaimer IS NOT NULL")),
     )
 
-    # Relationships
     brand = relationship("Brand", back_populates="ads")
     insight = relationship("Insight", back_populates="ad", uselist=False, cascade="all, delete-orphan")
 

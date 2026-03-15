@@ -37,27 +37,46 @@ logger = get_logger(__name__)
 PROMPT_VERSION = "v3"  # bumped for political ad awareness
 
 
-def _detect_ad_context(ad: Ad) -> str:
+def _detect_ad_context(ad) -> str:
     """
     Detect whether this ad is political/social issue or commercial.
-    Uses page_name and caption heuristics since raw_meta_json has disclaimer field.
+
+    Ground truth sources (in priority order):
+    1. disclaimer field — Meta-verified political/issue declaration
+       This is the authoritative signal. If it exists, Meta has
+       required the advertiser to complete identity verification
+       confirming this is a political/issue/social ad.
+    2. bylines field — "Paid for by" text (same meaning as disclaimer)
+    3. beneficiary_payers — EU political transparency field
+    4. Keyword fallback — for cases where political ads ran with
+       disclaimer but it wasn't captured in the snapshot
+
     Returns: 'political' | 'commercial'
     """
     raw = ad.raw_meta_json or {}
-    disclaimer = raw.get("disclaimer", "") or ""
-    page_name = ad.page_name or ""
-    caption = ad.caption or ""
 
-    if disclaimer:
+    # Primary: Meta's own political ad verification fields
+    disclaimer = raw.get("disclaimer") or ""
+    bylines = raw.get("bylines") or ""
+    beneficiary_payers = raw.get("beneficiary_payers") or []
+
+    if disclaimer or bylines or beneficiary_payers:
         return "political"
+
+    # Secondary: keyword heuristic for page names we know are political
+    # (catches edge cases where disclaimer wasn't in the fetched snapshot)
+    page_name = (ad.page_name or "").lower()
+    caption = (ad.caption or "").lower()
 
     political_keywords = [
         "party", "bjp", "congress", "election", "vote", "manifesto",
         "campaign", "political", "neta", "sarkar", "modi", "rahul",
-        "gandhi", "government", "india", "minister", "mp ", "mla ",
+        "gandhi", "government", "minister", "mp ", "mla ",
         "lok sabha", "rajya sabha", "phir ek baar", "viksit bharat",
+        "aam aadmi", "trinamool", "shiv sena", "samajwadi",
     ]
-    combined = (page_name + caption + disclaimer).lower()
+
+    combined = page_name + " " + caption
     if any(kw in combined for kw in political_keywords):
         return "political"
 

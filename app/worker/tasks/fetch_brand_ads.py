@@ -1,4 +1,11 @@
-"""Task: Fetch all ads for a brand — fetch → classify → score. No auto insight generation."""
+"""
+Task: Fetch all ads for a brand — fetch → classify → score.
+
+KEY CHANGE: Now stores disclaimer, bylines, beneficiary_payers,
+estimated_audience_size, demographic_distribution, delivery_by_region,
+languages, currency from the API response. These are all real fields
+the Meta Ads Library API returns — we were previously ignoring them.
+"""
 
 import time
 from datetime import datetime, timezone
@@ -23,19 +30,6 @@ BATCH_SIZE = 50
 
 
 async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
-    """
-    Brand ad fetch pipeline — intentionally stops before insight generation.
-
-    Flow:
-    1. Fetch ads from Meta API (up to max_ads)
-    2. Classify each ad type (STATIC/VIDEO) via metadata heuristics
-    3. Attempt media extraction from snapshot URL HTML
-    4. Score inactive ads with available performance data
-    5. STOP — insights are generated on-demand by user action only
-
-    Insight generation is explicitly NOT triggered here. Users choose which
-    ads to analyze via POST /ads/{ad_id}/insights/generate.
-    """
     start_time = time.time()
     identifier = payload["identifier"]
     countries = payload["countries"]
@@ -45,8 +39,7 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
     async with async_session_factory() as db:
         await db.execute(
             update(Job).where(Job.id == job_id).values(
-                status="RUNNING",
-                updated_at=datetime.now(timezone.utc),
+                status="RUNNING", updated_at=datetime.now(timezone.utc)
             )
         )
         await db.commit()
@@ -59,7 +52,6 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
         page_id = identifier
         fetcher = MetaFetcher(vk)
 
-        # Upsert brand record
         async with async_session_factory() as db:
             result = await db.execute(select(Brand).where(Brand.page_id == page_id))
             brand = result.scalar_one_or_none()
@@ -70,20 +62,18 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
             brand_id = brand.id
             await db.commit()
 
-        # Fetch and process ads in batches
         ad_batch = []
         total_fetched = 0
         total_processed = 0
         brand_page_name = None
         limit_reached = False
+        political_count = 0
 
         async for ad_raw in fetcher.fetch_all_ads_for_brand(page_id, countries, ad_active_status):
             if max_ads is not None and total_fetched >= max_ads:
                 limit_reached = True
-                logger.info("max_ads_limit_reached", max_ads=max_ads, total_fetched=total_fetched)
                 break
 
-            # Extract real page_name from first ad
             if brand_page_name is None:
                 brand_page_name = ad_raw.get("page_name")
                 if brand_page_name and brand_page_name != identifier:
@@ -92,7 +82,10 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
                             update(Brand).where(Brand.id == brand_id).values(page_name=brand_page_name)
                         )
                         await db.commit()
-                    logger.info("brand_name_updated", page_name=brand_page_name)
+
+            # Count political ads for logging
+            if ad_raw.get("disclaimer") or ad_raw.get("bylines") or ad_raw.get("beneficiary_payers"):
+                political_count += 1
 
             ad_batch.append(ad_raw)
             total_fetched += 1
@@ -108,10 +101,11 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
             "fetch_pipeline_complete",
             total_fetched=total_fetched,
             total_processed=total_processed,
+            political_ads=political_count,
+            commercial_ads=total_fetched - political_count,
             limit_reached=limit_reached,
         )
 
-        # Update brand count
         async with async_session_factory() as db:
             await db.execute(
                 update(Brand).where(Brand.id == brand_id).values(
@@ -121,8 +115,7 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
             )
             await db.commit()
 
-        # Score all ads for this brand (pure math, no external API calls)
-        scored = []
+        # Score all ads
         async with async_session_factory() as db:
             result = await db.execute(select(Ad).where(Ad.brand_id == brand_id))
             all_ads = result.scalars().all()
@@ -137,13 +130,6 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
                 )
             await db.commit()
 
-        logger.info(
-            "scoring_complete",
-            total_ads=len(all_ads),
-            scored=len(scored),
-            # Insights will be generated on-demand — none auto-enqueued here
-        )
-
         elapsed_ms = (time.time() - start_time) * 1000
         metrics.record_timing("fetch_brand_total", elapsed_ms)
 
@@ -153,6 +139,8 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
                     status="DONE",
                     result={
                         "total_ads": total_processed,
+                        "political_ads": political_count,
+                        "commercial_ads": total_fetched - political_count,
                         "scored_ads": len(scored),
                         "limit_reached": limit_reached,
                         "max_ads": max_ads,
@@ -165,16 +153,13 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
             await db.commit()
 
         await queue.update_status(job_id, "DONE")
-        logger.info("fetch_brand_complete", job_id=job_id, total=total_processed)
 
     except Exception as exc:
         logger.error("fetch_brand_failed", job_id=job_id, error=str(exc), exc_info=True)
         async with async_session_factory() as db:
             await db.execute(
                 update(Job).where(Job.id == job_id).values(
-                    status="FAILED",
-                    error=str(exc),
-                    updated_at=datetime.now(timezone.utc),
+                    status="FAILED", error=str(exc), updated_at=datetime.now(timezone.utc)
                 )
             )
             await db.commit()
@@ -183,17 +168,14 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
 
 
 async def _process_batch(ad_batch: list[dict], brand_id) -> int:
-    """Process a batch of raw ads: classify, attempt media fetch, upsert to DB."""
     processed = 0
 
     for ad_raw in ad_batch:
         try:
             ad_archive_id = ad_raw.get("ad_archive_id") or ad_raw.get("id", "")
             if not ad_archive_id:
-                logger.warning("ad_missing_id", keys=list(ad_raw.keys()))
                 continue
 
-            # Classify from metadata only — no VL model calls during bulk fetch
             ad_type, classification_method = await classify_ad(ad_raw)
 
             impressions = ad_raw.get("impressions") or {}
@@ -201,10 +183,9 @@ async def _process_batch(ad_batch: list[dict], brand_id) -> int:
             spend = ad_raw.get("spend") or {}
             snapshot_url = ad_raw.get("ad_snapshot_url")
 
-            # Attempt to extract real media URL from the snapshot HTML page.
-            # The snapshot URL renders an HTML page — we parse it to find the
-            # actual image/video src. This is the only way to get direct media
-            # from the Ads Library API (no direct URLs are returned in the JSON).
+            # Estimated audience size (separate from impressions)
+            est_audience = ad_raw.get("estimated_audience_size") or {}
+
             media_local_path = None
             frame_paths = None
             frame_metadata = None
@@ -230,6 +211,15 @@ async def _process_batch(ad_batch: list[dict], brand_id) -> int:
             link_titles = ad_raw.get("ad_creative_link_titles") or []
             link_descs = ad_raw.get("ad_creative_link_descriptions") or []
 
+            # Political ad specific fields
+            disclaimer = ad_raw.get("disclaimer") or None
+            bylines = ad_raw.get("bylines") or None
+            beneficiary_payers = ad_raw.get("beneficiary_payers") or None
+            demographic_distribution = ad_raw.get("demographic_distribution") or None
+            delivery_by_region = ad_raw.get("delivery_by_region") or None
+            languages = ad_raw.get("languages") or None
+            currency = ad_raw.get("currency") or None
+
             async with async_session_factory() as db:
                 stmt = pg_insert(Ad).values(
                     ad_archive_id=ad_archive_id,
@@ -251,10 +241,20 @@ async def _process_batch(ad_batch: list[dict], brand_id) -> int:
                     reach_upper=_parse_range_value(reach, "upper_bound"),
                     spend_lower=_parse_range_value(spend, "lower_bound"),
                     spend_upper=_parse_range_value(spend, "upper_bound"),
+                    estimated_audience_lower=_parse_range_value(est_audience, "lower_bound"),
+                    estimated_audience_upper=_parse_range_value(est_audience, "upper_bound"),
                     snapshot_url=snapshot_url,
                     media_local_path=media_local_path,
                     frame_paths=frame_paths,
                     frame_metadata=frame_metadata,
+                    # New political/demographic fields
+                    disclaimer=disclaimer,
+                    bylines=bylines,
+                    beneficiary_payers=beneficiary_payers,
+                    demographic_distribution=demographic_distribution,
+                    delivery_by_region=delivery_by_region,
+                    languages=languages,
+                    currency=currency,
                     raw_meta_json=ad_raw,
                 ).on_conflict_do_update(
                     index_elements=["ad_archive_id"],
@@ -266,6 +266,11 @@ async def _process_batch(ad_batch: list[dict], brand_id) -> int:
                         "reach_upper": _parse_range_value(reach, "upper_bound"),
                         "spend_lower": _parse_range_value(spend, "lower_bound"),
                         "spend_upper": _parse_range_value(spend, "upper_bound"),
+                        "disclaimer": disclaimer,
+                        "bylines": bylines,
+                        "beneficiary_payers": beneficiary_payers,
+                        "demographic_distribution": demographic_distribution,
+                        "delivery_by_region": delivery_by_region,
                         "snapshot_url": snapshot_url,
                         "media_local_path": media_local_path,
                         "raw_meta_json": ad_raw,
@@ -277,8 +282,6 @@ async def _process_batch(ad_batch: list[dict], brand_id) -> int:
 
             processed += 1
             metrics.increment("ads_processed")
-            logger.info("ad_upserted", ad_archive_id=ad_archive_id, ad_type=ad_type,
-                        has_media=media_local_path is not None)
 
         except Exception as exc:
             ad_id_for_log = ad_raw.get("ad_archive_id") or ad_raw.get("id", "unknown")
@@ -300,7 +303,7 @@ def _parse_date(value: str | None):
         return None
 
 
-def _parse_range_value(range_dict: dict | str | None, key: str) -> int | None:
+def _parse_range_value(range_dict, key: str) -> int | None:
     if not range_dict or isinstance(range_dict, str):
         return None
     val = range_dict.get(key)
