@@ -61,7 +61,7 @@ SNAPSHOT_HEADERS = {
 }
 
 # Regex to find signed fbcdn URLs anywhere in raw HTML
-FBCDN_VIDEO_RE = re.compile(r'(https://scontent[^"\'\\]+\.(?:mp4|mov)[^"\'\\]*)')
+FBCDN_VIDEO_RE = re.compile(r'(https://video[^"\'\\]+fbcdn\.net[^"\'\\]+)')
 FBCDN_IMAGE_RE = re.compile(r'(https://scontent[^"\'\\]+\.(?:jpg|jpeg|png|webp)[^"\'\\]*)')
 
 
@@ -192,6 +192,34 @@ def _extract_from_meta_tags(html: str) -> tuple[str | None, str | None]:
 
     return image_url, video_url
 
+def _extract_from_serverjs_json(html: str) -> tuple[str | None, str | None]:
+    """
+    Extract media URLs from ServerJS JSON blobs embedded in script tags.
+    This is the most reliable source for video URLs.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+
+    image_url = None
+    video_url = None
+
+    for script in soup.find_all("script", type="application/json"):
+        try:
+            data = json.loads(script.string)
+        except Exception:
+            continue
+
+        v, i = _walk_json_for_media(data)
+
+        if v and not video_url:
+            video_url = v
+
+        if i and not image_url:
+            image_url = i
+
+        if video_url and image_url:
+            break
+
+    return image_url, video_url
 
 def _extract_from_regex(html: str) -> tuple[str | None, str | None]:
     """
@@ -245,16 +273,21 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str) -> di
 
                 html = response.text
 
-            # --- Strategy 1: JSON blobs ---
-            image_url, video_url = _extract_from_json_blobs(html)
-            method = "json_blob"
+            # Strategy 1: ServerJS JSON
+            image_url, video_url = _extract_from_serverjs_json(html)
+            method = "serverjs"
 
-            # --- Strategy 2: og meta tags ---
+            # Strategy 2: __bbox blobs
+            if not image_url and not video_url:
+                image_url, video_url = _extract_from_json_blobs(html)
+                method = "bbox"
+
+            # --- Strategy 3: og meta tags ---
             if not image_url and not video_url:
                 image_url, video_url = _extract_from_meta_tags(html)
                 method = "og_meta"
 
-            # --- Strategy 3: regex ---
+            # --- Strategy 4: regex ---
             if not image_url and not video_url:
                 image_url, video_url = _extract_from_regex(html)
                 method = "regex"
