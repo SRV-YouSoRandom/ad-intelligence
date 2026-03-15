@@ -89,5 +89,5 @@ export const generateInsight = async (adId: string) =>
 export const deleteInsight = async (adId: string) =>
   fetchApi(`/ads/${adId}/insights`, { method: 'DELETE' });
 
-export const getBrandRecommendations = async (brandId: string) =>
-  fetchApi(`/brands/${brandId}/recommendations`);
+export const getBrandRecommendations = async (brandId: string, forceRefresh = false) =>
+  fetchApi(`/brands/${brandId}/recommendations${forceRefresh ? '?force_refresh=true' : ''}`);
