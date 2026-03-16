@@ -61,9 +61,9 @@ SNAPSHOT_HEADERS = {
 }
 
 # Regex to find signed fbcdn URLs anywhere in raw HTML
-# Loosened to be more permissive with characters in query strings
-FBCDN_VIDEO_RE = re.compile(r'(https://scontent[^"\'\\]+\.(?:mp4|mov|m4v)[^"\'\\]*)')
-FBCDN_IMAGE_RE = re.compile(r'(https://scontent[^"\'\\]+\.(?:jpg|jpeg|png|webp|gif)[^"\'\\]*)')
+# Loosened to be escaping-aware (handles https:\/\/ and http:\/\/)
+FBCDN_VIDEO_RE = re.compile(r'(https?:\\?/\\?/[^"\'\s]+\.(?:mp4|mov|m4v)[^"\'\s]*)')
+FBCDN_IMAGE_RE = re.compile(r'(https?:\\?/\\?/[^"\'\s]+\.(?:jpg|jpeg|png|webp|gif)[^"\'\s]*)')
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -242,16 +242,18 @@ def _extract_from_regex(html: str) -> tuple[str | None, str | None]:
     video_url = None
     video_matches = FBCDN_VIDEO_RE.findall(html)
     if video_matches:
-        # Prefer longer URLs (more complete, less likely truncated)
-        video_url = max(video_matches, key=len)
+        # Unescape immediately (handles \/)
+        best_v = max(video_matches, key=len)
+        video_url = best_v.replace("\\/", "/").replace("\\u0025", "%")
 
     image_url = None
     image_matches = FBCDN_IMAGE_RE.findall(html)
     if image_matches:
-        # Filter out tiny profile pictures (s60x60 in URL = small icon)
+        # Filter out tiny profile pictures
         full_size = [u for u in image_matches if "s60x60" not in u and "s40x40" not in u]
         if full_size:
-            image_url = max(full_size, key=len)
+            best_i = max(full_size, key=len)
+            image_url = best_i.replace("\\/", "/").replace("\\u0025", "%")
 
     return image_url, video_url
 
@@ -308,10 +310,15 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str) -> di
             if not image_url and not video_url:
                 # Diagnostic logging: log snippet of the HTML to help debug "no media" states
                 snippet = html[:1000].replace("\n", " ")
+                
+                # Check if keywords even exist in the raw text
+                has_keywords = "fbcdn" in html or "scontent" in html or "video" in html
+                
                 logger.warning(
                     "snapshot_no_media_found", 
                     ad_id=ad_archive_id, 
                     html_size=len(html),
+                    has_media_keywords=has_keywords,
                     html_snippet=snippet
                 )
                 return None
