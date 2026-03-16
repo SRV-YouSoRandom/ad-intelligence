@@ -31,8 +31,8 @@ WEIGHTS = {
 @dataclass
 class ScoringMetrics:
     impressions_mid: int
-    reach_mid: int
-    reach_efficiency: float
+    reach_mid: Optional[int]
+    reach_efficiency: Optional[float]
     duration_days: Optional[int]
     daily_impressions: Optional[float]
     data_quality: str  # 'full' | 'partial' | 'range_only'
@@ -43,16 +43,16 @@ def compute_raw_metrics(ad: Ad) -> Optional[ScoringMetrics]:
     Compute raw performance metrics for a single ad.
     Returns None if the ad has no impression/reach data (unscoreable).
     """
-    if ad.impressions_mid is None or ad.reach_mid is None:
+    if ad.impressions_mid is None:
         return None
 
     imp = int(ad.impressions_mid)
-    reach = int(ad.reach_mid)
-
+    
     if imp == 0:
         return None
 
-    reach_efficiency = min(reach / imp, 1.0)  # cap at 1.0 for data hygiene
+    reach_mid = int(ad.reach_mid) if ad.reach_mid is not None else None
+    reach_efficiency = min(reach_mid / imp, 1.0) if reach_mid is not None else None
 
     duration_days: Optional[int] = None
     daily_impressions: Optional[float] = None
@@ -72,7 +72,7 @@ def compute_raw_metrics(ad: Ad) -> Optional[ScoringMetrics]:
 
     return ScoringMetrics(
         impressions_mid=imp,
-        reach_mid=reach,
+        reach_mid=reach_mid,
         reach_efficiency=reach_efficiency,
         duration_days=duration_days,
         daily_impressions=daily_impressions,
@@ -126,6 +126,9 @@ def score_brand_ads(ads: list[Ad]) -> list[tuple[Ad, float, str, float]]:
 
     di_available = sum(1 for _, m in scoreable if m.daily_impressions is not None)
     use_daily = di_available >= len(scoreable) * 0.5  # only use if >50% have date data
+    
+    re_available = sum(1 for _, m in scoreable if m.reach_efficiency is not None)
+    use_reach = re_available >= len(scoreable) * 0.5
 
     if no_dates_count > 0:
         logger.info(
@@ -133,22 +136,27 @@ def score_brand_ads(ads: list[Ad]) -> list[tuple[Ad, float, str, float]]:
             missing=no_dates_count,
             total=len(scoreable),
             using_daily_impressions=use_daily,
+            using_reach_efficiency=use_reach,
         )
 
-    # Redistribute weights if daily_impressions is skipped
-    if use_daily:
-        w_re = WEIGHTS["reach_efficiency"]
-        w_imp = WEIGHTS["impressions_mid"]
-        w_di = WEIGHTS["daily_impressions"]
-    else:
-        # Redistribute daily_impressions weight proportionally
-        total_other = WEIGHTS["reach_efficiency"] + WEIGHTS["impressions_mid"]
-        w_re = WEIGHTS["reach_efficiency"] + WEIGHTS["daily_impressions"] * (WEIGHTS["reach_efficiency"] / total_other)
-        w_imp = WEIGHTS["impressions_mid"] + WEIGHTS["daily_impressions"] * (WEIGHTS["impressions_mid"] / total_other)
-        w_di = 0.0
+    # Redistribute weights proportionally based on available data
+    base_w = {
+        "reach_efficiency": WEIGHTS["reach_efficiency"] if use_reach else 0.0,
+        "impressions_mid": WEIGHTS["impressions_mid"],
+        "daily_impressions": WEIGHTS["daily_impressions"] if use_daily else 0.0,
+    }
+    
+    total_active_w = sum(base_w.values())
+    w_re = base_w["reach_efficiency"] / total_active_w if total_active_w > 0 else 0
+    w_imp = base_w["impressions_mid"] / total_active_w if total_active_w > 0 else 0
+    w_di = base_w["daily_impressions"] / total_active_w if total_active_w > 0 else 0
 
     # Normalize each metric across the brand dataset
-    re_vals = _normalize([m.reach_efficiency for _, m in scoreable])
+    if use_reach:
+        re_vals = _normalize([m.reach_efficiency if m.reach_efficiency is not None else 0.0 for _, m in scoreable])
+    else:
+        re_vals = [0.0] * len(scoreable)
+        
     imp_vals = _normalize([m.impressions_mid for _, m in scoreable])
 
     if use_daily:
