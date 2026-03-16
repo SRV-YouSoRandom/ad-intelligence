@@ -60,6 +60,9 @@ SNAPSHOT_HEADERS = {
     "Cache-Control": "no-cache",
 }
 
+# Regex to find signed fbcdn URLs anywhere in raw HTML
+# Loosened to be escaping-aware (handles https:\/\/ and http:\/\/)
+FBCDN_VIDEO_RE = re.compile(r'(https?:\\?/\\?/[^"\'\s]+\.(?:mp4|mov|m4v)[^"\'\s]*)')
 FBCDN_IMAGE_RE = re.compile(r'(https?:\\?/\\?/[^"\'\s]+\.(?:jpg|jpeg|png|webp|gif)[^"\'\s]*)')
 
 # Patterns that strongly suggest a profile picture or non-ad icon
