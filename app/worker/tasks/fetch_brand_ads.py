@@ -200,6 +200,15 @@ async def _process_batch(ad_batch: list[dict], brand_id) -> int:
 
             ad_type, classification_method = await classify_ad(ad_raw, media_local_path, is_video_signal)
 
+            logger.info(
+                "ad_media_identified",
+                ad_id=ad_archive_id,
+                ad_type=ad_type,
+                classification_method=classification_method,
+                has_media_path=bool(media_local_path),
+                is_video_signal=is_video_signal
+            )
+
             start_date = _parse_date(ad_raw.get("ad_delivery_start_time"))
             end_date = _parse_date(ad_raw.get("ad_delivery_stop_time"))
 

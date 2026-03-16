@@ -68,7 +68,7 @@ FBCDN_IMAGE_RE = re.compile(r'(https?:\\?/\\?/[^"\'\s]+\.(?:jpg|jpeg|png|webp|gi
 # Patterns that strongly suggest a profile picture or non-ad icon
 PROBABLE_PROFILE_PIC_PATTERNS = [
     "profile", "avatar", "icon", "logo", "s60x60", "s40x40", "s32x32", "s120x120",
-    "t1.0-1", "p50x50", "p100x100"
+    "t1.0-1", "p50x50", "p100x100", "xc26acl"
 ]
 
 # Keys in JSON that usually point to page/actor assets rather than the ad creative
@@ -156,12 +156,16 @@ def _walk_json_for_media(data, depth=0) -> tuple[set[str], set[str]]:
     if isinstance(data, dict):
         # Skip strictly profile-related branches
         for pk in PROFILE_JSON_KEYS:
-            if pk in data and len(data) < 4:
+            if pk in data and len(data) < 6: # Increased threshold for safer profile detection
                 return v_urls, i_urls
 
         for k, v in data.items():
             if k in CREATIVE_JSON_KEYS and isinstance(v, str):
                 if "fbcdn" in v or "scontent" in v:
+                    # HEURISTIC: If 'xc26acl' is present in the same dict, it's likely a profile asset
+                    if "xc26acl" in str(data):
+                        continue
+                    
                     cleaned = v.replace("\\/", "/").replace("\\u0025", "%")
                     if any(ext in cleaned.lower() for ext in [".mp4", ".mov", ".m4v"]):
                         v_urls.add(cleaned)
@@ -203,19 +207,38 @@ def _extract_media_candidates(html: str) -> tuple[str | None, str | None]:
     raw_i = re.findall(r'"(image_url|original_image_url)"\s*:\s*"([^"]+)"', html)
     all_images.update([r[1].replace("\\/", "/").replace("\\u0025", "%") for r in raw_i])
 
-    # 2. HTML Tags
+    # 2. HTML Tags (with smart class-based filtering)
     soup = BeautifulSoup(html, "html.parser")
+    
+    # Ad images have no xc26acl; profile images/icons are wrapped in it
+    for img_tag in soup.find_all("img"):
+        src = img_tag.get("src")
+        if not src: continue
+        
+        # Check parents for xc26acl (Meta's signature for profile assets)
+        is_profile = False
+        if img_tag.find_parent(class_="xc26acl"):
+            is_profile = True
+            
+        # Check alt text
+        alt = (img_tag.get("alt") or "").lower()
+        if alt and any(p in alt for p in ["profile", "logo", "avatar"]):
+            is_profile = True
+            
+        if is_profile:
+            # Add to images but we will penalize it later based on the URL pattern if needed
+            # Actually, let's just make it clear in the ranking
+            all_images.add(src) 
+        else:
+            all_images.add(src)
+
     for v_tag in soup.find_all("video"):
-        src = v_tag.get("src")
+        src = v_tag.get("src") or v_tag.get("data-src")
         if src: all_videos.add(src)
         for source in v_tag.find_all("source"):
             if source.get("src"): all_videos.add(source.get("src"))
         poster = v_tag.get("poster")
         if poster: all_images.add(poster)
-
-    for img_tag in soup.find_all("img"):
-        src = img_tag.get("src")
-        if src: all_images.add(src)
 
     # 3. Meta Tags
     for meta in soup.find_all("meta"):
@@ -232,15 +255,35 @@ def _extract_media_candidates(html: str) -> tuple[str | None, str | None]:
     if all_videos:
         valid_v = [v for v in all_videos if v and ("fbcdn" in v or "scontent" in v)]
         if valid_v:
-            best_video = max(valid_v, key=lambda x: rank_url(x, True))
-            if rank_url(best_video, True) < -10000: best_video = None
+            scored_v = [(v, rank_url(v, True)) for v in valid_v]
+            scored_v.sort(key=lambda x: x[1], reverse=True)
+            best_video, best_v_score = scored_v[0]
+            
+            logger.debug(
+                "video_candidates_ranked",
+                top_score=best_v_score,
+                candidate_count=len(valid_v),
+                best_url_snippet=best_video[:60]
+            )
+            
+            if best_v_score < -10000: best_video = None
 
     best_image = None
     if all_images:
         valid_i = [i for i in all_images if i and ("fbcdn" in i or "scontent" in i)]
         if valid_i:
-            best_image = max(valid_i, key=lambda x: rank_url(x, False))
-            if rank_url(best_image, False) < -10000: best_image = None
+            scored_i = [(i, rank_url(i, False)) for i in valid_i]
+            scored_i.sort(key=lambda x: x[1], reverse=True)
+            best_image, best_i_score = scored_i[0]
+            
+            logger.debug(
+                "image_candidates_ranked",
+                top_score=best_i_score,
+                candidate_count=len(valid_i),
+                best_url_snippet=best_image[:60]
+            )
+            
+            if best_i_score < -10000: best_image = None
 
     return best_image, best_video
 
