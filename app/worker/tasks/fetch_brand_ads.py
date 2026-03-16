@@ -176,8 +176,6 @@ async def _process_batch(ad_batch: list[dict], brand_id) -> int:
             if not ad_archive_id:
                 continue
 
-            ad_type, classification_method = await classify_ad(ad_raw)
-
             impressions = ad_raw.get("impressions") or {}
             reach = ad_raw.get("reach") or {}
             spend = ad_raw.get("spend") or {}
@@ -196,6 +194,8 @@ async def _process_batch(ad_batch: list[dict], brand_id) -> int:
                     media_local_path = media_result.get("media_local_path")
                     frame_paths = media_result.get("frame_paths")
                     frame_metadata = media_result.get("frame_metadata")
+
+            ad_type, classification_method = await classify_ad(ad_raw, media_local_path)
 
             start_date = _parse_date(ad_raw.get("ad_delivery_start_time"))
             end_date = _parse_date(ad_raw.get("ad_delivery_stop_time"))

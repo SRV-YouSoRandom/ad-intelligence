@@ -119,12 +119,30 @@ def classify_from_metadata(ad_raw: dict) -> tuple[str, str] | None:
     return None  # Fall through to VL model
 
 
-async def classify_with_vl_model(snapshot_url: str) -> tuple[str, str]:
+import base64
+
+async def classify_with_vl_model(media_local_path: str) -> tuple[str, str]:
     """
-    Pass 3: Use Qwen VL-30B to visually classify from snapshot URL.
+    Pass 3: Use Qwen VL-30B to visually classify from the downloaded media file.
     Falls back to UNKNOWN on any failure.
     """
+    if not media_local_path or not os.path.exists(media_local_path):
+        logger.warning("classification_vl_missing_media", path=media_local_path)
+        return ("UNKNOWN", "fallback_no_media")
+
     try:
+        with open(media_local_path, "rb") as image_file:
+            encoded_string = base64.b64encode(image_file.read()).decode('utf-8')
+        
+        # OpenRouter wants a base64 data URI for uploaded images
+        mime_type = "image/jpeg"
+        if media_local_path.lower().endswith(".png"):
+            mime_type = "image/png"
+        elif media_local_path.lower().endswith(".webp"):
+            mime_type = "image/webp"
+            
+        data_uri = f"data:{mime_type};base64,{encoded_string}"
+
         payload = {
             "model": settings.CLASSIFICATION_MODEL,
             "max_tokens": 50,
@@ -133,7 +151,7 @@ async def classify_with_vl_model(snapshot_url: str) -> tuple[str, str]:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "image_url", "image_url": {"url": snapshot_url}},
+                        {"type": "image_url", "image_url": {"url": data_uri}},
                         {"type": "text", "text": "Classify this ad creative. Respond only with the JSON."},
                     ],
                 },
@@ -170,7 +188,7 @@ async def classify_with_vl_model(snapshot_url: str) -> tuple[str, str]:
         return ("UNKNOWN", "fallback")
 
 
-async def classify_ad(ad_raw: dict) -> tuple[str, str]:
+async def classify_ad(ad_raw: dict, media_local_path: str | None = None) -> tuple[str, str]:
     """
     Full three-pass classification pipeline.
     Returns: (ad_type, classification_method)
@@ -180,9 +198,8 @@ async def classify_ad(ad_raw: dict) -> tuple[str, str]:
         metrics.increment("classification_metadata")
         return result
 
-    snapshot_url = ad_raw.get("ad_snapshot_url")
-    if snapshot_url:
-        return await classify_with_vl_model(snapshot_url)
+    if media_local_path:
+        return await classify_with_vl_model(media_local_path)
 
     logger.warning("classification_no_signal", ad_id=ad_raw.get("ad_archive_id") or ad_raw.get("id"))
     return ("UNKNOWN", "fallback")
