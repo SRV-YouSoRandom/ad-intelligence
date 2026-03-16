@@ -193,6 +193,10 @@ async def classify_ad(ad_raw: dict, media_local_path: str | None = None) -> tupl
     Full three-pass classification pipeline.
     Returns: (ad_type, classification_method)
     """
+    # High-priority signal: Media Processor explicitly found a video file
+    if media_local_path and media_local_path.lower().endswith((".mp4", ".mov", ".m4v")):
+        return ("VIDEO", "media_processor_file_signal")
+
     result = classify_from_metadata(ad_raw)
     if result:
         metrics.increment("classification_metadata")

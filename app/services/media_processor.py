@@ -60,10 +60,25 @@ SNAPSHOT_HEADERS = {
     "Cache-Control": "no-cache",
 }
 
-# Regex to find signed fbcdn URLs anywhere in raw HTML
-# Loosened to be escaping-aware (handles https:\/\/ and http:\/\/)
-FBCDN_VIDEO_RE = re.compile(r'(https?:\\?/\\?/[^"\'\s]+\.(?:mp4|mov|m4v)[^"\'\s]*)')
 FBCDN_IMAGE_RE = re.compile(r'(https?:\\?/\\?/[^"\'\s]+\.(?:jpg|jpeg|png|webp|gif)[^"\'\s]*)')
+
+# Patterns that strongly suggest a profile picture or non-ad icon
+PROBABLE_PROFILE_PIC_PATTERNS = [
+    "profile", "avatar", "icon", "logo", "s60x60", "s40x40", "s32x32", "s120x120",
+    "t1.0-1", "p50x50", "p100x100"
+]
+
+# Keys in JSON that usually point to page/actor assets rather than the ad creative
+PROFILE_JSON_KEYS = {
+    "page_profile_picture", "profile_photo", "actor_photo", "profile_pic",
+    "logo_url", "owner_image_url"
+}
+
+# Keys that strongly indicate the actual ad creative
+CREATIVE_JSON_KEYS = {
+    "playable_url", "playable_url_quality_hd", "video_sd_url", "video_hd_url",
+    "image_url", "original_image_url", "resized_image_url"
+}
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -138,19 +153,31 @@ def _walk_json_for_media(data, depth=0) -> tuple[str | None, str | None]:
     video_url = None
 
     if isinstance(data, dict):
-        # Direct key hits
-        for vkey in ("playable_url_quality_hd", "playable_url", "video_sd_url", "video_hd_url", "src"):
+        # 1. Skip strictly profile-related branches
+        for pk in PROFILE_JSON_KEYS:
+            if pk in data:
+                # We don't return None here, we just don't dive into this specific dict if it's strictly a profile dict
+                # However, sometimes Meta nests things, so we check if it's ONLY profile stuff
+                if len(data) < 3: # Typical profile pic dict is small
+                    return None, None
+
+        # 2. Direct hits on Creative Keys
+        for vkey in ("playable_url_quality_hd", "playable_url", "video_sd_url", "video_hd_url"):
             val = data.get(vkey)
-            if isinstance(val, str) and "fbcdn" in val and not video_url:
-                video_url = val.replace("\\/", "/")
-                break
+            if isinstance(val, str) and ("fbcdn" in val or "scontent" in val):
+                # Ensure it's not an icon
+                if not any(p in val.lower() for p in PROBABLE_PROFILE_PIC_PATTERNS):
+                    video_url = val.replace("\\/", "/")
+                    break
 
-        for ikey in ("image_url", "original_image_url", "resized_image_url", "uri"):
+        for ikey in ("image_url", "original_image_url", "resized_image_url"):
             val = data.get(ikey)
-            if isinstance(val, str) and "fbcdn" in val and not image_url:
-                image_url = val.replace("\\/", "/")
-                break
+            if isinstance(val, str) and ("fbcdn" in val or "scontent" in val):
+                if not any(p in val.lower() for p in PROBABLE_PROFILE_PIC_PATTERNS):
+                    image_url = val.replace("\\/", "/")
+                    break
 
+        # 3. Recursive walk if not found
         if not video_url or not image_url:
             for v in data.values():
                 sub_v, sub_i = _walk_json_for_media(v, depth + 1)
@@ -239,20 +266,29 @@ def _extract_from_regex(html: str) -> tuple[str | None, str | None]:
     Last resort: raw regex scan for signed fbcdn URLs.
     Catches cases where URLs are in inline JS strings.
     """
+    def rank_url(url: str, is_video: bool) -> float:
+        score = float(len(url)) # Prefer longer URLs (usually contain signature)
+        # Penalize profile/icon patterns heavily
+        if any(p in url.lower() for p in PROBABLE_PROFILE_PIC_PATTERNS):
+            score -= 10000
+        # Boost scontent/fbcdn keywords
+        if "scontent" in url: score += 100
+        if is_video and (".mp4" in url or ".mov" in url): score += 500
+        return score
+
     video_url = None
     video_matches = FBCDN_VIDEO_RE.findall(html)
     if video_matches:
-        # Unescape immediately (handles \/)
-        best_v = max(video_matches, key=len)
-        video_url = best_v.replace("\\/", "/").replace("\\u0025", "%")
+        # Rank and pick best
+        best_v = max(video_matches, key=lambda x: rank_url(x, True))
+        if rank_url(best_v, True) > 0:
+            video_url = best_v.replace("\\/", "/").replace("\\u0025", "%")
 
     image_url = None
     image_matches = FBCDN_IMAGE_RE.findall(html)
     if image_matches:
-        # Filter out tiny profile pictures
-        full_size = [u for u in image_matches if "s60x60" not in u and "s40x40" not in u]
-        if full_size:
-            best_i = max(full_size, key=len)
+        best_i = max(image_matches, key=lambda x: rank_url(x, False))
+        if rank_url(best_i, False) > 0:
             image_url = best_i.replace("\\/", "/").replace("\\u0025", "%")
 
     return image_url, video_url
