@@ -187,6 +187,7 @@ async def _process_batch(ad_batch: list[dict], brand_id) -> int:
             media_local_path = None
             frame_paths = None
             frame_metadata = None
+            is_video_signal = False
 
             if snapshot_url:
                 media_result = await fetch_media_from_snapshot(snapshot_url, ad_archive_id)
@@ -194,8 +195,10 @@ async def _process_batch(ad_batch: list[dict], brand_id) -> int:
                     media_local_path = media_result.get("media_local_path")
                     frame_paths = media_result.get("frame_paths")
                     frame_metadata = media_result.get("frame_metadata")
+                    if (frame_paths and len(frame_paths) > 0) or (media_local_path and media_local_path.lower().endswith((".mp4", ".mov", ".m4v"))):
+                        is_video_signal = True
 
-            ad_type, classification_method = await classify_ad(ad_raw, media_local_path)
+            ad_type, classification_method = await classify_ad(ad_raw, media_local_path, is_video_signal)
 
             start_date = _parse_date(ad_raw.get("ad_delivery_start_time"))
             end_date = _parse_date(ad_raw.get("ad_delivery_stop_time"))

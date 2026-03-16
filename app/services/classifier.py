@@ -143,6 +143,8 @@ async def classify_with_vl_model(media_local_path: str) -> tuple[str, str]:
             
         data_uri = f"data:{mime_type};base64,{encoded_string}"
 
+        data_uri = f"data:{mime_type};base64,{encoded_string}"
+
         payload = {
             "model": settings.CLASSIFICATION_MODEL,
             "max_tokens": 50,
@@ -188,12 +190,16 @@ async def classify_with_vl_model(media_local_path: str) -> tuple[str, str]:
         return ("UNKNOWN", "fallback")
 
 
-async def classify_ad(ad_raw: dict, media_local_path: str | None = None) -> tuple[str, str]:
+async def classify_ad(ad_raw: dict, media_local_path: str | None = None, is_video_signal: bool = False) -> tuple[str, str]:
     """
     Full three-pass classification pipeline.
     Returns: (ad_type, classification_method)
     """
-    # High-priority signal: Media Processor explicitly found a video file
+    # High-priority signal: Media Processor explicitly found a video file/stream
+    if is_video_signal:
+        return ("VIDEO", "media_processor_video_signal")
+
+    # Second high-priority: file extension of the local path
     if media_local_path and media_local_path.lower().endswith((".mp4", ".mov", ".m4v")):
         return ("VIDEO", "media_processor_file_signal")
 

@@ -476,6 +476,14 @@ async def generate_insight(ad: Ad) -> InsightResult:
         messages = _build_text_only_messages(ad, ad_context)
         mode = "text_only"
 
+    logger.info(
+        "insight_generation_starting",
+        ad_id=str(ad.id),
+        mode=mode,
+        media_path=ad.media_local_path or "text-only",
+        frames_count=len(ad.frame_metadata) if ad.frame_metadata else 0
+    )
+
     payload = {
         "model": settings.INSIGHT_MODEL,
         "max_tokens": 2000,

@@ -108,193 +108,141 @@ def _ensure_ad_dir(ad_archive_id: str) -> Path:
 
 # ── Core: extract media URLs from snapshot HTML ────────────────────────────────
 
-def _extract_from_json_blobs(html: str) -> tuple[str | None, str | None]:
+def rank_url(url: str, is_video: bool) -> float:
     """
-    Facebook embeds ad creative data as JSON in <script> tags before
-    React hydrates. Look for video_sd_url, video_hd_url, image_url etc.
-    This is the most reliable extraction path.
+    Ranks URLs based on probability of being the primary ad creative.
+    - Meta uses v-type suffixes: -1 (profile/icon), -6/-7 (images), -2 (videos).
+    - HD versions and longer URLs (with full signatures) are preferred.
     """
-    image_url = None
-    video_url = None
+    if not url: return -100000.0
+    url_l = url.lower()
+    score = 0.0
 
-    # Pattern 1: __bbox JSON blobs (server-side data)
-    bbox_matches = re.findall(r'__bbox\s*,\s*(\{.{100,50000}?\})\s*\)', html, re.DOTALL)
-    for blob in bbox_matches[:5]:  # check first 5 blobs
+    # 1. Fatal Penalties (Profile pics, icons, small thumbnails)
+    if any(p in url_l for p in PROBABLE_PROFILE_PIC_PATTERNS):
+        score -= 50000.0
+    
+    # Meta's specific v-type suffix check (-1 = profile/small icon)
+    if "-1" in url_l and "/v/" in url_l:
+        score -= 20000.0
+
+    # 2. Type Boosts
+    if is_video:
+        score += 10000.0
+        if any(ext in url_l for ext in [".mp4", ".mov", ".m4v"]):
+            score += 5000.0
+    
+    # 3. Quality/Creative Boosts
+    if "hd" in url_l or "original" in url_l:
+        score += 2000.0
+    if "-6" in url_l or "-7" in url_l or "-2" in url_l:
+        score += 3000.0 # Creative v-types
+    
+    if "scontent" in url_l:
+        score += 500.0
+
+    # 4. Length as a tie-breaker (longer = more signature parameters)
+    score += len(url) / 10.0
+
+    return score
+
+
+def _walk_json_for_media(data, depth=0) -> tuple[set[str], set[str]]:
+    """Recursively find ALL potential media URLs in a JSON blob."""
+    v_urls = set()
+    i_urls = set()
+    if depth > 40: return v_urls, i_urls
+
+    if isinstance(data, dict):
+        # Skip strictly profile-related branches
+        for pk in PROFILE_JSON_KEYS:
+            if pk in data and len(data) < 4:
+                return v_urls, i_urls
+
+        for k, v in data.items():
+            if k in CREATIVE_JSON_KEYS and isinstance(v, str):
+                if "fbcdn" in v or "scontent" in v:
+                    cleaned = v.replace("\\/", "/").replace("\\u0025", "%")
+                    if any(ext in cleaned.lower() for ext in [".mp4", ".mov", ".m4v"]):
+                        v_urls.add(cleaned)
+                    else:
+                        i_urls.add(cleaned)
+            else:
+                sub_v, sub_i = _walk_json_for_media(v, depth + 1)
+                v_urls.update(sub_v)
+                i_urls.update(sub_i)
+
+    elif isinstance(data, list):
+        for item in data[:30]:
+            sub_v, sub_i = _walk_json_for_media(item, depth + 1)
+            v_urls.update(sub_v)
+            i_urls.update(sub_i)
+
+    return v_urls, i_urls
+
+
+def _extract_media_candidates(html: str) -> tuple[str | None, str | None]:
+    """Exhaustive collection and ranking of all media candidates."""
+    all_videos = set()
+    all_images = set()
+
+    # 1. JSON blobs
+    bbox_matches = re.findall(r'__bbox\s*,\s*(\{.{100,55000}?\})\s*\)', html, re.DOTALL)
+    for blob in bbox_matches[:10]:
         try:
             data = json.loads(blob)
             v, i = _walk_json_for_media(data)
-            if v and not video_url:
-                video_url = v
-            if i and not image_url:
-                image_url = i
-            if video_url and image_url:
-                break
+            all_videos.update(v)
+            all_images.update(i)
         except (json.JSONDecodeError, RecursionError):
             continue
 
-    # Pattern 2: require("VideoPlayer") or similar embedded JSON
-    if not video_url:
-        video_matches = re.findall(r'"playable_url(?:_quality_hd)?"\s*:\s*"([^"]+)"', html)
-        if video_matches:
-            video_url = video_matches[0].replace("\\u0025", "%").replace("\\/", "/")
+    # Raw string scan for creative keys (fallback for malformed JSON)
+    raw_v = re.findall(r'"playable_url(?:_quality_hd)?"\s*:\s*"([^"]+)"', html)
+    all_videos.update([r.replace("\\/", "/").replace("\\u0025", "%") for r in raw_v])
+    raw_i = re.findall(r'"(image_url|original_image_url)"\s*:\s*"([^"]+)"', html)
+    all_images.update([r[1].replace("\\/", "/").replace("\\u0025", "%") for r in raw_i])
 
-    # Pattern 3: poster/thumbnail URLs
-    if not image_url:
-        poster_matches = re.findall(r'"poster"\s*:\s*"(https://scontent[^"]+)"', html)
-        if poster_matches:
-            image_url = poster_matches[0].replace("\\/", "/")
-
-    return image_url, video_url
-
-
-def _walk_json_for_media(data, depth=0) -> tuple[str | None, str | None]:
-    """Recursively walk a JSON structure looking for video/image URLs."""
-    if depth > 8:
-        return None, None
-
-    image_url = None
-    video_url = None
-
-    if isinstance(data, dict):
-        # 1. Skip strictly profile-related branches
-        for pk in PROFILE_JSON_KEYS:
-            if pk in data:
-                # We don't return None here, we just don't dive into this specific dict if it's strictly a profile dict
-                # However, sometimes Meta nests things, so we check if it's ONLY profile stuff
-                if len(data) < 3: # Typical profile pic dict is small
-                    return None, None
-
-        # 2. Direct hits on Creative Keys
-        for vkey in ("playable_url_quality_hd", "playable_url", "video_sd_url", "video_hd_url"):
-            val = data.get(vkey)
-            if isinstance(val, str) and ("fbcdn" in val or "scontent" in val):
-                # Ensure it's not an icon
-                if not any(p in val.lower() for p in PROBABLE_PROFILE_PIC_PATTERNS):
-                    video_url = val.replace("\\/", "/")
-                    break
-
-        for ikey in ("image_url", "original_image_url", "resized_image_url"):
-            val = data.get(ikey)
-            if isinstance(val, str) and ("fbcdn" in val or "scontent" in val):
-                if not any(p in val.lower() for p in PROBABLE_PROFILE_PIC_PATTERNS):
-                    image_url = val.replace("\\/", "/")
-                    break
-
-        # 3. Recursive walk if not found
-        if not video_url or not image_url:
-            for v in data.values():
-                sub_v, sub_i = _walk_json_for_media(v, depth + 1)
-                if sub_v and not video_url:
-                    video_url = sub_v
-                if sub_i and not image_url:
-                    image_url = sub_i
-                if video_url and image_url:
-                    break
-
-    elif isinstance(data, list):
-        for item in data[:20]:  # limit list traversal
-            sub_v, sub_i = _walk_json_for_media(item, depth + 1)
-            if sub_v and not video_url:
-                video_url = sub_v
-            if sub_i and not image_url:
-                image_url = sub_i
-            if video_url and image_url:
-                break
-
-    return image_url, video_url
-
-
-def _extract_from_meta_tags(html: str) -> tuple[str | None, str | None]:
-    """
-    og:image and og:video are populated server-side — always present
-    even without JavaScript. Reliable fallback.
-    """
+    # 2. HTML Tags
     soup = BeautifulSoup(html, "html.parser")
+    for v_tag in soup.find_all("video"):
+        src = v_tag.get("src")
+        if src: all_videos.add(src)
+        for source in v_tag.find_all("source"):
+            if source.get("src"): all_videos.add(source.get("src"))
+        poster = v_tag.get("poster")
+        if poster: all_images.add(poster)
 
-    video_url = None
-    og_video = soup.find("meta", property="og:video") or soup.find("meta", property="og:video:url")
-    if og_video:
-        video_url = og_video.get("content")
+    for img_tag in soup.find_all("img"):
+        src = img_tag.get("src")
+        if src: all_images.add(src)
 
-    image_url = None
-    og_image = soup.find("meta", property="og:image")
-    if og_image:
-        image_url = og_image.get("content")
+    # 3. Meta Tags
+    for meta in soup.find_all("meta"):
+        prop = meta.get("property", "")
+        if prop and "og:video" in prop: all_videos.add(meta.get("content"))
+        if prop and "og:image" in prop: all_images.add(meta.get("content"))
 
-    return image_url, video_url
+    # 4. Regex fallback
+    all_videos.update([r.replace("\\/", "/").replace("\\u0025", "%") for r in FBCDN_VIDEO_RE.findall(html)])
+    all_images.update([r.replace("\\/", "/").replace("\\u0025", "%") for r in FBCDN_IMAGE_RE.findall(html)])
 
+    # --- RANKING ---
+    best_video = None
+    if all_videos:
+        valid_v = [v for v in all_videos if v and ("fbcdn" in v or "scontent" in v)]
+        if valid_v:
+            best_video = max(valid_v, key=lambda x: rank_url(x, True))
+            if rank_url(best_video, True) < -10000: best_video = None
 
-def _extract_from_html_tags(html: str) -> tuple[str | None, str | None]:
-    """
-    Directly search for <img> and <video> tags in the HTML body.
-    Scans for fbcdn.net / scontent URLs in src or poster attributes.
-    Useful when Meta renders the full DOM for authenticated requests.
-    """
-    soup = BeautifulSoup(html, "html.parser")
-    video_url = None
-    image_url = None
+    best_image = None
+    if all_images:
+        valid_i = [i for i in all_images if i and ("fbcdn" in i or "scontent" in i)]
+        if valid_i:
+            best_image = max(valid_i, key=lambda x: rank_url(x, False))
+            if rank_url(best_image, False) < -10000: best_image = None
 
-    # Scan <video> tags
-    for video in soup.find_all("video"):
-        # Check src or <source> child
-        v_url = video.get("src")
-        if not v_url:
-            source = video.find("source")
-            if source:
-                v_url = source.get("src")
-        
-        if v_url and ("fbcdn" in v_url or "scontent" in v_url):
-            video_url = v_url
-            # Also grab poster if available
-            p_url = video.get("poster")
-            if p_url and ("fbcdn" in p_url or "scontent" in p_url):
-                image_url = p_url
-            break
-
-    # Scan <img> tags (if no video poster found)
-    if not image_url:
-        for img in soup.find_all("img"):
-            i_url = img.get("src")
-            # Skip profile pictures (small icons)
-            if i_url and ("fbcdn" in i_url or "scontent" in i_url):
-                if not any(x in i_url for x in ["s60x60", "s40x40", "s32x32"]):
-                    image_url = i_url
-                    break
-
-    return image_url, video_url
-
-
-def _extract_from_regex(html: str) -> tuple[str | None, str | None]:
-    """
-    Last resort: raw regex scan for signed fbcdn URLs.
-    Catches cases where URLs are in inline JS strings.
-    """
-    def rank_url(url: str, is_video: bool) -> float:
-        score = float(len(url)) # Prefer longer URLs (usually contain signature)
-        # Penalize profile/icon patterns heavily
-        if any(p in url.lower() for p in PROBABLE_PROFILE_PIC_PATTERNS):
-            score -= 10000
-        # Boost scontent/fbcdn keywords
-        if "scontent" in url: score += 100
-        if is_video and (".mp4" in url or ".mov" in url): score += 500
-        return score
-
-    video_url = None
-    video_matches = FBCDN_VIDEO_RE.findall(html)
-    if video_matches:
-        # Rank and pick best
-        best_v = max(video_matches, key=lambda x: rank_url(x, True))
-        if rank_url(best_v, True) > 0:
-            video_url = best_v.replace("\\/", "/").replace("\\u0025", "%")
-
-    image_url = None
-    image_matches = FBCDN_IMAGE_RE.findall(html)
-    if image_matches:
-        best_i = max(image_matches, key=lambda x: rank_url(x, False))
-        if rank_url(best_i, False) > 0:
-            image_url = best_i.replace("\\/", "/").replace("\\u0025", "%")
-
-    return image_url, video_url
+    return best_image, best_video
 
 
 async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str) -> dict | None:
@@ -327,24 +275,9 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str) -> di
 
                 html = response.text
 
-            # --- Strategy 1: JSON blobs ---
-            image_url, video_url = _extract_from_json_blobs(html)
-            method = "json_blob"
-
-            # --- Strategy 2: og meta tags ---
-            if not image_url and not video_url:
-                image_url, video_url = _extract_from_meta_tags(html)
-                method = "og_meta"
-
-            # --- Strategy 3: Direct HTML tags (New) ---
-            if not image_url and not video_url:
-                image_url, video_url = _extract_from_html_tags(html)
-                method = "html_tags"
-
-            # --- Strategy 4: regex ---
-            if not image_url and not video_url:
-                image_url, video_url = _extract_from_regex(html)
-                method = "regex"
+            # --- Exhaustive Candidate Extraction & Ranking ---
+            image_url, video_url = _extract_media_candidates(html)
+            method = "ranked_candidates"
 
             if not image_url and not video_url:
                 # Diagnostic logging: log snippet of the HTML to help debug "no media" states
