@@ -223,19 +223,13 @@ async def _process_batch(ad_batch: list[dict], brand_id) -> int:
             # Calculate midpoints for performance scoring
             imp_lower = _parse_range_value(impressions, "lower_bound")
             imp_upper = _parse_range_value(impressions, "upper_bound")
-            imp_mid = None
-            if imp_lower is not None and imp_upper is not None:
-                imp_mid = (imp_lower + imp_upper) // 2
-            elif imp_lower is not None:
-                imp_mid = imp_lower
+            if imp_lower is not None and imp_upper is None:
+                imp_upper = imp_lower
                 
             reach_lower = _parse_range_value(reach, "lower_bound")
             reach_upper = _parse_range_value(reach, "upper_bound")
-            reach_mid = None
-            if reach_lower is not None and reach_upper is not None:
-                reach_mid = (reach_lower + reach_upper) // 2
-            elif reach_lower is not None:
-                reach_mid = reach_lower
+            if reach_lower is not None and reach_upper is None:
+                reach_upper = reach_lower
 
             async with async_session_factory() as db:
                 stmt = pg_insert(Ad).values(
@@ -254,10 +248,8 @@ async def _process_batch(ad_batch: list[dict], brand_id) -> int:
                     end_date=end_date,
                     impressions_lower=imp_lower,
                     impressions_upper=imp_upper,
-                    impressions_mid=imp_mid,
                     reach_lower=reach_lower,
                     reach_upper=reach_upper,
-                    reach_mid=reach_mid,
                     spend_lower=_parse_range_value(spend, "lower_bound"),
                     spend_upper=_parse_range_value(spend, "upper_bound"),
                     estimated_audience_lower=_parse_range_value(est_audience, "lower_bound"),
@@ -281,10 +273,8 @@ async def _process_batch(ad_batch: list[dict], brand_id) -> int:
                         "is_active": bool(ad_raw.get("is_active", False)),
                         "impressions_lower": imp_lower,
                         "impressions_upper": imp_upper,
-                        "impressions_mid": imp_mid,
                         "reach_lower": reach_lower,
                         "reach_upper": reach_upper,
-                        "reach_mid": reach_mid,
                         "spend_lower": _parse_range_value(spend, "lower_bound"),
                         "spend_upper": _parse_range_value(spend, "upper_bound"),
                         "disclaimer": disclaimer,
