@@ -61,8 +61,9 @@ SNAPSHOT_HEADERS = {
 }
 
 # Regex to find signed fbcdn URLs anywhere in raw HTML
-FBCDN_VIDEO_RE = re.compile(r'(https://scontent[^"\'\\]+\.(?:mp4|mov)[^"\'\\]*)')
-FBCDN_IMAGE_RE = re.compile(r'(https://scontent[^"\'\\]+\.(?:jpg|jpeg|png|webp)[^"\'\\]*)')
+# Loosened to be more permissive with characters in query strings
+FBCDN_VIDEO_RE = re.compile(r'(https://scontent[^"\'\\]+\.(?:mp4|mov|m4v)[^"\'\\]*)')
+FBCDN_IMAGE_RE = re.compile(r'(https://scontent[^"\'\\]+\.(?:jpg|jpeg|png|webp|gif)[^"\'\\]*)')
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -193,6 +194,46 @@ def _extract_from_meta_tags(html: str) -> tuple[str | None, str | None]:
     return image_url, video_url
 
 
+def _extract_from_html_tags(html: str) -> tuple[str | None, str | None]:
+    """
+    Directly search for <img> and <video> tags in the HTML body.
+    Scans for fbcdn.net / scontent URLs in src or poster attributes.
+    Useful when Meta renders the full DOM for authenticated requests.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    video_url = None
+    image_url = None
+
+    # Scan <video> tags
+    for video in soup.find_all("video"):
+        # Check src or <source> child
+        v_url = video.get("src")
+        if not v_url:
+            source = video.find("source")
+            if source:
+                v_url = source.get("src")
+        
+        if v_url and ("fbcdn" in v_url or "scontent" in v_url):
+            video_url = v_url
+            # Also grab poster if available
+            p_url = video.get("poster")
+            if p_url and ("fbcdn" in p_url or "scontent" in p_url):
+                image_url = p_url
+            break
+
+    # Scan <img> tags (if no video poster found)
+    if not image_url:
+        for img in soup.find_all("img"):
+            i_url = img.get("src")
+            # Skip profile pictures (small icons)
+            if i_url and ("fbcdn" in i_url or "scontent" in i_url):
+                if not any(x in i_url for x in ["s60x60", "s40x40", "s32x32"]):
+                    image_url = i_url
+                    break
+
+    return image_url, video_url
+
+
 def _extract_from_regex(html: str) -> tuple[str | None, str | None]:
     """
     Last resort: raw regex scan for signed fbcdn URLs.
@@ -254,13 +295,25 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str) -> di
                 image_url, video_url = _extract_from_meta_tags(html)
                 method = "og_meta"
 
-            # --- Strategy 3: regex ---
+            # --- Strategy 3: Direct HTML tags (New) ---
+            if not image_url and not video_url:
+                image_url, video_url = _extract_from_html_tags(html)
+                method = "html_tags"
+
+            # --- Strategy 4: regex ---
             if not image_url and not video_url:
                 image_url, video_url = _extract_from_regex(html)
                 method = "regex"
 
             if not image_url and not video_url:
-                logger.warning("snapshot_no_media_found", ad_id=ad_archive_id, html_size=len(html))
+                # Diagnostic logging: log snippet of the HTML to help debug "no media" states
+                snippet = html[:1000].replace("\n", " ")
+                logger.warning(
+                    "snapshot_no_media_found", 
+                    ad_id=ad_archive_id, 
+                    html_size=len(html),
+                    html_snippet=snippet
+                )
                 return None
 
             logger.info(
