@@ -181,12 +181,6 @@ async def _process_batch(ad_batch: list[dict], brand_id) -> int:
             spend = ad_raw.get("spend") or {}
             snapshot_url = ad_raw.get("ad_snapshot_url")
 
-            if snapshot_url:
-                snapshot_url = snapshot_url.replace(
-                    "ads/archive/render_ad",
-                    "ads/library/render_ad"
-                )
-
             # Estimated audience size (separate from impressions)
             est_audience = ad_raw.get("estimated_audience_size") or {}
 
