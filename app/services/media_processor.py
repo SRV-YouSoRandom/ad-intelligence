@@ -116,24 +116,58 @@ def _extract_media_candidates(html: str):
     video = soup.find("video")
 
     if video:
+
+        # direct video src
         if video.get("src"):
             video_url = video["src"]
 
-        source = video.find("source")
-        if not video_url and source and source.get("src"):
-            video_url = source["src"]
+        # source tag inside video
+        if not video_url:
+            source = video.find("source")
+            if source and source.get("src"):
+                video_url = source["src"]
+
+        # fallback: data-store attribute
+        if not video_url and video.get("data-store"):
+            m = re.search(r'https://[^"]+\.mp4[^"]*', video["data-store"])
+            if m:
+                video_url = m.group(0)
 
         if video.get("poster"):
             image_url = video["poster"]
 
     if not image_url:
+
+        best_candidate = None
+
         for img in soup.find_all("img"):
+
             src = img.get("src")
             if not src:
                 continue
-            if "scontent" in src and "t39.35426" in src:
-                image_url = src
-                break
+
+            # must be fbcdn creative
+            if "scontent" not in src:
+                continue
+
+            # ignore UI assets
+            if "emoji" in src or "static" in src:
+                continue
+
+            # prefer ad creative patterns
+            if any(x in src for x in ["t39.35426", "t45", "t51"]):
+
+                # prefer higher resolution creative
+                if any(x in src for x in ["p1080", "p720", "p640", "p1200"]):
+                    image_url = src
+                    break
+
+                # fallback candidate
+                if not best_candidate:
+                    best_candidate = src
+
+        if not image_url and best_candidate:
+            image_url = best_candidate
 
     if not video_url:
         m = FBCDN_VIDEO_RE.search(html)
