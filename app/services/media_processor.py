@@ -108,36 +108,40 @@ def _extract_bbox_media(html: str):
 
 def _extract_media_candidates(html: str):
 
-    video_url = None
     image_url = None
+    video_url = None
 
-    # ---------------------------------------------------------
+    # ------------------------------------------------
     # VIDEO detection
-    # ---------------------------------------------------------
+    # ------------------------------------------------
 
-    m = re.search(r"https://[^\"']+\.mp4[^\"']*", html)
-
-    if m:
-        video_url = m.group(0)
-        logger.info("video_regex_detected", video_url=video_url)
-
-    # ---------------------------------------------------------
-    # IMAGE detection (fbcdn creative)
-    # ---------------------------------------------------------
-
-    fbcdn_images = re.findall(
-        r"https://scontent[^\"']+fbcdn\.net[^\"']+\.(?:jpg|jpeg|png|webp)[^\"']*",
+    video_matches = re.findall(
+        r"https://video[^\"']+fbcdn\.net[^\"']+",
         html
     )
 
-    if fbcdn_images:
-
-        # first one is almost always the creative
-        image_url = fbcdn_images[0]
-
+    if video_matches:
+        video_url = video_matches[0]
         logger.info(
-            "fbcdn_image_detected",
-            candidate_count=len(fbcdn_images),
+            "video_fbcdn_detected",
+            candidate_count=len(video_matches),
+            selected=video_url
+        )
+
+    # ------------------------------------------------
+    # IMAGE detection
+    # ------------------------------------------------
+
+    image_matches = re.findall(
+        r"https://scontent[^\"']+fbcdn\.net[^\"']+",
+        html
+    )
+
+    if image_matches:
+        image_url = image_matches[0]
+        logger.info(
+            "image_fbcdn_detected",
+            candidate_count=len(image_matches),
             selected=image_url
         )
 
