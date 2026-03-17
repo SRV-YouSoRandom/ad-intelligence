@@ -161,7 +161,6 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str):
             async with httpx.AsyncClient(
                 timeout=45,
                 follow_redirects=True,
-                headers=SNAPSHOT_HEADERS
             ) as client:
 
                 response = await client.get(snapshot_url, headers=SNAPSHOT_HEADERS)
