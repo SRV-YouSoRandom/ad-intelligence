@@ -35,6 +35,7 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
     countries = payload["countries"]
     ad_active_status = payload.get("ad_active_status", "ALL")
     max_ads: int | None = payload.get("max_ads", 200)
+    search_term: str | None = payload.get("search_term")
 
     async with async_session_factory() as db:
         await db.execute(
@@ -69,7 +70,11 @@ async def run_fetch_brand_ads(job_id: str, payload: dict) -> None:
         limit_reached = False
         political_count = 0
 
-        async for ad_raw in fetcher.fetch_all_ads_for_brand(page_id, countries, ad_active_status):
+        # If no search term provided, we use the identifier (page name) as the search term
+        # because commercial ads REQUIRE search_terms unless you are an approved researcher.
+        fetch_search = search_term or brand.page_name or identifier
+
+        async for ad_raw in fetcher.fetch_all_ads_for_brand(page_id, countries, ad_active_status, search_term=fetch_search):
             if max_ads is not None and total_fetched >= max_ads:
                 limit_reached = True
                 break

@@ -142,6 +142,7 @@ class MetaFetcher:
         page_id: str,
         countries: list[str],
         status: str = "ALL",
+        search_term: str | None = None,
     ) -> AsyncIterator[dict]:
         """
         Fetch all ads for a brand via cursor-based pagination.
@@ -159,6 +160,8 @@ class MetaFetcher:
             "limit": 100,
             "access_token": settings.META_ACCESS_TOKEN,
         }
+        if search_term:
+            params["search_terms"] = search_term
         url = self.base_url
         total_fetched = 0
         page_num = 0
