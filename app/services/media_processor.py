@@ -362,6 +362,23 @@ async def download_video(video_url: str, ad_archive_id: str):
 # FRAME EXTRACTION
 # ---------------------------------------------------------
 
+async def _get_video_duration(video_path: str) -> float:
+    try:
+        process = await asyncio.create_subprocess_exec(
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, _ = await process.communicate()
+        return float(stdout.decode().strip())
+    except (ValueError, Exception) as e:
+        logger.warning("ffprobe_failed", error=str(e))
+        return 0.0
+
 async def extract_frames(video_path: str, ad_archive_id: str):
 
     ad_dir = _ensure_ad_dir(ad_archive_id)
@@ -369,13 +386,31 @@ async def extract_frames(video_path: str, ad_archive_id: str):
 
     frames_pattern = os.path.join(output_dir, "frame_%03d.jpg")
 
+    duration = await _get_video_duration(video_path)
+    
+    # Adaptive extraction logic based on duration
+    if duration <= 10.0:
+        # Short: 1 frame every 2s
+        vf_filter = "fps=1/2,scale=1280:-1"
+    elif duration <= 30.0:
+        # Medium: 1 frame every 4s
+        vf_filter = "fps=1/4,scale=1280:-1"
+    elif duration <= 60.0:
+        # Long: 1 frame every 8s
+        vf_filter = "fps=1/8,scale=1280:-1"
+    else:
+        # Extra Long: 1 frame every 12s
+        vf_filter = "fps=1/12,scale=1280:-1"
+        
+    logger.info("extracting_frames", ad_id=ad_archive_id, duration=duration, filter=vf_filter)
+
     process = await asyncio.create_subprocess_exec(
         "ffmpeg",
         "-y",
         "-i",
         video_path,
         "-vf",
-        "select='gt(scene,0.3)',scale=1280:-1",
+        vf_filter,
         "-vsync",
         "vfr",
         frames_pattern,
