@@ -148,6 +148,12 @@ def _extract_media_candidates(html: str):
 
 async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str):
 
+    logger.info(
+        "snapshot_url_debug",
+        ad_id=ad_archive_id,
+        snapshot_url=snapshot_url
+    )
+
     async with _get_semaphore():
 
         try:
@@ -158,12 +164,7 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str):
                 headers=SNAPSHOT_HEADERS
             ) as client:
 
-                mobile_url = snapshot_url.replace(
-                    "https://www.facebook.com",
-                    "https://mbasic.facebook.com"
-                )
-
-                response = await client.get(mobile_url, headers=SNAPSHOT_HEADERS)
+                response = await client.get(snapshot_url, headers=SNAPSHOT_HEADERS)
 
                 if response.status_code != 200:
                     logger.warning(
