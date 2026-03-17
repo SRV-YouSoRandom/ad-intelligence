@@ -158,7 +158,12 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str):
                 headers=SNAPSHOT_HEADERS
             ) as client:
 
-                response = await client.get(snapshot_url, headers=SNAPSHOT_HEADERS)
+                mobile_url = snapshot_url.replace(
+                    "https://www.facebook.com",
+                    "https://mbasic.facebook.com"
+                )
+
+                response = await client.get(mobile_url, headers=SNAPSHOT_HEADERS)
 
                 if response.status_code != 200:
                     logger.warning(
