@@ -114,38 +114,59 @@ def _extract_media_candidates(html: str):
     image_url = None
 
     # ---------------------------------------------------------
-    # VIDEO (most reliable)
+    # DEBUG: log first 10 image tags so we see what HTML contains
+    # ---------------------------------------------------------
+
+    for img in soup.find_all("img")[:10]:
+        logger.info(
+            "img_candidate_debug",
+            src=img.get("src"),
+            referrerpolicy=img.get("referrerpolicy"),
+            class_name=img.get("class"),
+        )
+
+    # ---------------------------------------------------------
+    # VIDEO detection
     # ---------------------------------------------------------
 
     video_tag = soup.find("video")
 
     if video_tag:
 
-        # actual video file
         source = video_tag.find("source")
 
         if source and source.get("src"):
             video_url = source["src"]
 
-        # poster frame (fallback image)
         if video_tag.get("poster"):
             image_url = video_tag["poster"]
 
+        logger.info(
+            "video_tag_detected",
+            video_url=video_url,
+            poster=image_url
+        )
 
     # ---------------------------------------------------------
-    # IMAGE (real creative)
+    # IMAGE detection (creative)
     # ---------------------------------------------------------
 
     if not image_url:
 
         creative_img = soup.find("img", {"referrerpolicy": "origin-when-cross-origin"})
 
-        if creative_img and creative_img.get("src"):
-            image_url = creative_img["src"]
+        if creative_img:
 
+            logger.info(
+                "creative_img_detected",
+                tag=str(creative_img)[:500]
+            )
+
+            if creative_img.get("src"):
+                image_url = creative_img["src"]
 
     # ---------------------------------------------------------
-    # LAST RESORT FALLBACK
+    # REGEX FALLBACKS
     # ---------------------------------------------------------
 
     if not video_url:
@@ -208,17 +229,31 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str):
                 contains_img_tag=("<img" in html),
             )
 
-            # ---- Try JSON first ----
+            extractor_used = None
+
+            # JSON extractor
             image_url, video_url = _extract_bbox_media(html)
 
-            # ---- fallback to HTML ----
+            if image_url or video_url:
+                extractor_used = "bbox"
+
+            # HTML fallback
             if not image_url and not video_url:
                 image_url, video_url = _extract_media_candidates(html)
+                extractor_used = "html"
 
             if not image_url and not video_url:
                 logger.warning(
                     "snapshot_no_media_found",
                     ad_id=ad_archive_id
+                )
+
+                logger.info(
+                    "snapshot_media_debug",
+                    ad_id=ad_archive_id,
+                    extractor=extractor_used,
+                    image_url=image_url,
+                    video_url=video_url
                 )
                 return None
 
