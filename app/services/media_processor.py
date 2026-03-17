@@ -1,30 +1,3 @@
-"""
-Media processor — fetches real media from Meta snapshot pages.
-
-WHY THE OLD APPROACH FAILED:
-The snapshot URL (render_ad/?id=...&access_token=...) renders a React app.
-BeautifulSoup sees the server-side HTML shell — the <video> and <img> tags
-are injected by JavaScript AFTER the page loads. A plain httpx GET never
-sees them.
-
-THE CORRECT APPROACH:
-The snapshot URL already contains the access token as a query parameter.
-We fetch it with proper browser-like headers and a longer timeout, then
-look for the CDN URLs two ways:
-
-  1. JSON data embedded in <script> tags (Facebook embeds ad data as
-     __bbox / ServerJS JSON before React hydrates — this is the reliable path)
-  2. og:image / og:video meta tags (populated server-side, always present)
-  3. Direct regex scan for fbcdn.net URLs in the raw HTML
-
-The CDN URLs (scontent.fccu31-X.fna.fbcdn.net) are signed with expiry
-tokens in the query string — they're directly downloadable without any
-session cookie, for as long as the token hasn't expired (~hours to days).
-
-For videos we download the full file then extract scene-change frames.
-For images we download directly.
-"""
-
 import asyncio
 import json
 import os
@@ -43,8 +16,6 @@ logger = get_logger(__name__)
 
 _download_semaphore: asyncio.Semaphore | None = None
 
-# Headers that make the request look like a real browser visit.
-# Without these, Facebook returns a minimal non-JS fallback page.
 SNAPSHOT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml",
@@ -52,29 +23,8 @@ SNAPSHOT_HEADERS = {
     "Referer": "https://www.facebook.com/ads/library/",
 }
 
-# Regex to find signed fbcdn URLs anywhere in raw HTML
-# Loosened to be escaping-aware (handles https:\/\/ and http:\/\/)
-FBCDN_VIDEO_RE = re.compile(r'https://[^"\s]+\.mp4[^"\s]*')
-FBCDN_IMAGE_RE = re.compile(r'https://[^"\s]+\.(?:jpg|jpeg|png|webp)[^"\s]*')
-
-# Patterns that strongly suggest a profile picture or non-ad icon
-PROBABLE_PROFILE_PIC_PATTERNS = [
-    "profile", "avatar", "icon", "logo", "s60x60", "s40x40", "s32x32", "s120x120",
-    "t1.0-1", "p50x50", "p100x100", "xc26acl"
-]
-
-# Keys in JSON that usually point to page/actor assets rather than the ad creative
-PROFILE_JSON_KEYS = {
-    "page_profile_picture", "profile_photo", "actor_photo", "profile_pic",
-    "logo_url", "owner_image_url"
-}
-
-# Keys that strongly indicate the actual ad creative
-CREATIVE_JSON_KEYS = {
-    "playable_url", "playable_url_quality_hd", "video_sd_url", "video_hd_url",
-    "image_url", "original_image_url", "resized_image_url"
-}
-
+FBCDN_VIDEO_RE = re.compile(r"https://[^\"']+\.mp4[^\"']*")
+FBCDN_IMAGE_RE = re.compile(r"https://[^\"']+\.(?:jpg|jpeg|png|webp)[^\"']*")
 
 def _get_semaphore() -> asyncio.Semaphore:
     global _download_semaphore
@@ -98,121 +48,83 @@ def _ensure_ad_dir(ad_archive_id: str) -> Path:
     return ad_dir
 
 
-# ── Core: extract media URLs from snapshot HTML ────────────────────────────────
+# ---------------------------------------------------------
+# JSON extractor (MOST RELIABLE)
+# ---------------------------------------------------------
 
-def rank_url(url: str, is_video: bool) -> float:
-    """
-    Ranks URLs based on probability of being the primary ad creative.
-    - Meta uses v-type suffixes: -1 (profile/icon), -6/-7 (images), -2 (videos).
-    - HD versions and longer URLs (with full signatures) are preferred.
-    """
-    if not url: return -100000.0
-    url_l = url.lower()
-    score = 0.0
+def _extract_bbox_media(html: str):
 
-    # 1. Fatal Penalties (Profile pics, icons, small thumbnails)
-    if any(p in url_l for p in PROBABLE_PROFILE_PIC_PATTERNS):
-        score -= 50000.0
-    
-    # Meta's specific v-type suffix check (-1 = profile/small icon)
-    if "-1" in url_l and "/v/" in url_l:
-        score -= 20000.0
+    video_url = None
+    image_url = None
 
-    # 2. Type Boosts
-    if is_video:
-        score += 10000.0
-        if any(ext in url_l for ext in [".mp4", ".mov", ".m4v"]):
-            score += 5000.0
-    
-    # 3. Quality/Creative Boosts
-    if "hd" in url_l or "original" in url_l:
-        score += 2000.0
-    if "-6" in url_l or "-7" in url_l or "-2" in url_l:
-        score += 3000.0 # Creative v-types
-    
-    if "scontent" in url_l:
-        score += 500.0
+    matches = re.findall(r'__bbox\s*,\s*(\{.*?\})\s*\)', html, re.DOTALL)
 
-    # 4. Length as a tie-breaker (longer = more signature parameters)
-    score += len(url) / 10.0
+    for blob in matches[:5]:
+        try:
+            data = json.loads(blob)
+        except Exception:
+            continue
 
-    return score
+        def walk(obj):
+            nonlocal video_url, image_url
 
+            if isinstance(obj, dict):
+                for k, v in obj.items():
 
-def _walk_json_for_media(data, depth=0) -> tuple[set[str], set[str]]:
-    """Recursively find ALL potential media URLs in a JSON blob."""
-    v_urls = set()
-    i_urls = set()
-    if depth > 40: return v_urls, i_urls
+                    if isinstance(v, str):
 
-    if isinstance(data, dict):
-        # Skip strictly profile-related branches
-        for pk in PROFILE_JSON_KEYS:
-            if pk in data and len(data) < 6: # Increased threshold for safer profile detection
-                return v_urls, i_urls
+                        if "video" in k and ".mp4" in v:
+                            if not video_url:
+                                video_url = v.replace("\\/", "/")
 
-        for k, v in data.items():
-            if k in CREATIVE_JSON_KEYS and isinstance(v, str):
-                if "fbcdn" in v or "scontent" in v:
-                    # HEURISTIC: If 'xc26acl' is present in the same dict, it's likely a profile asset
-                    if "xc26acl" in str(data):
-                        continue
-                    
-                    cleaned = v.replace("\\/", "/").replace("\\u0025", "%")
-                    if any(ext in cleaned.lower() for ext in [".mp4", ".mov", ".m4v"]):
-                        v_urls.add(cleaned)
-                    else:
-                        i_urls.add(cleaned)
-            else:
-                sub_v, sub_i = _walk_json_for_media(v, depth + 1)
-                v_urls.update(sub_v)
-                i_urls.update(sub_i)
+                        if "image" in k and "fbcdn" in v:
+                            if not image_url:
+                                image_url = v.replace("\\/", "/")
 
-    elif isinstance(data, list):
-        for item in data[:30]:
-            sub_v, sub_i = _walk_json_for_media(item, depth + 1)
-            v_urls.update(sub_v)
-            i_urls.update(sub_i)
+                    walk(v)
 
-    return v_urls, i_urls
+            elif isinstance(obj, list):
+                for i in obj:
+                    walk(i)
+
+        walk(data)
+
+    return image_url, video_url
 
 
-def _extract_media_candidates(html: str) -> tuple[str | None, str | None]:
+# ---------------------------------------------------------
+# HTML extractor
+# ---------------------------------------------------------
+
+def _extract_media_candidates(html: str):
 
     soup = BeautifulSoup(html, "html.parser")
 
     video_url = None
     image_url = None
 
-    # --- VIDEO ---
     video = soup.find("video")
 
     if video:
         if video.get("src"):
             video_url = video["src"]
 
-        else:
-            source = video.find("source")
-            if source and source.get("src"):
-                video_url = source["src"]
+        source = video.find("source")
+        if not video_url and source and source.get("src"):
+            video_url = source["src"]
 
-        if video.get("poster") and not image_url:
+        if video.get("poster"):
             image_url = video["poster"]
 
-    # --- IMAGE ---
     if not image_url:
-
         for img in soup.find_all("img"):
-
             src = img.get("src")
             if not src:
                 continue
-
             if "scontent" in src and "t39.35426" in src:
                 image_url = src
                 break
 
-    # --- regex fallback ---
     if not video_url:
         m = FBCDN_VIDEO_RE.search(html)
         if m:
@@ -226,152 +138,67 @@ def _extract_media_candidates(html: str) -> tuple[str | None, str | None]:
     return image_url, video_url
 
 
-async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str) -> dict | None:
-    """
-    Fetch media from Meta Ads Library using the internal GraphQL endpoint.
+# ---------------------------------------------------------
+# MAIN MEDIA FETCH
+# ---------------------------------------------------------
 
-    This avoids scraping the React snapshot page and instead queries the same
-    API the Ads Library frontend uses to fetch creative assets.
-
-    Returns:
-        {
-            media_local_path,
-            frame_paths,
-            frame_metadata
-        }
-    """
+async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str):
 
     async with _get_semaphore():
 
         try:
 
-            # -------------------------------------------------
-            # Extract ad_archive_id
-            # -------------------------------------------------
-
-            match = re.search(r"id=(\d+)", snapshot_url)
-            if match:
-                ad_archive_id = match.group(1)
-
-            # -------------------------------------------------
-            # GraphQL endpoint used by Ads Library frontend
-            # -------------------------------------------------
-
-            graphql_url = "https://www.facebook.com/api/graphql/"
-
-            payload = {
-                "doc_id": "24394279933530446",
-                "variables": json.dumps({
-                    "adArchiveID": ad_archive_id
-                })
-            }
-
-            headers = {
-                "User-Agent": SNAPSHOT_HEADERS["User-Agent"],
-                "Content-Type": "application/x-www-form-urlencoded",
-                "Accept": "*/*",
-                "Origin": "https://www.facebook.com",
-                "Referer": snapshot_url,
-            }
-
             async with httpx.AsyncClient(
-                timeout=30,
+                timeout=45,
                 follow_redirects=True,
-                headers=headers,
+                headers=SNAPSHOT_HEADERS
             ) as client:
 
-                response = await client.post(graphql_url, data=payload)
+                response = await client.get(snapshot_url)
 
                 if response.status_code != 200:
                     logger.warning(
-                        "graphql_fetch_failed_using_html_fallback",
+                        "snapshot_fetch_failed",
                         ad_id=ad_archive_id,
                         status=response.status_code,
                     )
-                    data = {}
-                else:
-                    data = response.json()
+                    return None
 
-            # -------------------------------------------------
-            # Walk JSON to find media URLs
-            # -------------------------------------------------
+                html = response.text
 
-            video_url = None
-            image_url = None
+            logger.info(
+                "snapshot_debug",
+                ad_id=ad_archive_id,
+                html_size=len(html),
+                contains_fbcdn=("fbcdn" in html),
+                contains_video_tag=("<video" in html),
+                contains_img_tag=("<img" in html),
+            )
 
-            def walk(obj):
+            # ---- Try JSON first ----
+            image_url, video_url = _extract_bbox_media(html)
 
-                nonlocal video_url, image_url
-
-                if isinstance(obj, dict):
-
-                    for k, v in obj.items():
-
-                        if isinstance(v, str):
-
-                            if "video_hd_url" in k or "video_sd_url" in k:
-                                if v and not video_url:
-                                    video_url = v
-
-                            if "image_url" in k or "original_image_url" in k:
-                                if v and not image_url:
-                                    image_url = v
-
-                        walk(v)
-
-                elif isinstance(obj, list):
-
-                    for item in obj:
-                        walk(item)
-
-            walk(data)
-
-            # -------------------------------------------------
-            # If nothing found, fallback to HTML extractor
-            # -------------------------------------------------
-
+            # ---- fallback to HTML ----
             if not image_url and not video_url:
-
-                logger.warning(
-                    "graphql_no_media_found_fallback_html",
-                    ad_id=ad_archive_id,
-                )
-
-                async with httpx.AsyncClient(
-                    timeout=45,
-                    follow_redirects=True,
-                    headers=SNAPSHOT_HEADERS,
-                    http2=True
-                ) as client:
-
-                    response = await client.get(snapshot_url)
-
-                    if response.status_code != 200:
-                        return None
-
-                    html = response.text
-
                 image_url, video_url = _extract_media_candidates(html)
 
             if not image_url and not video_url:
-
                 logger.warning(
                     "snapshot_no_media_found",
-                    ad_id=ad_archive_id,
+                    ad_id=ad_archive_id
                 )
                 return None
 
             logger.info(
-                "media_found",
+                "snapshot_media_found",
                 ad_id=ad_archive_id,
                 has_video=bool(video_url),
                 has_image=bool(image_url),
-                method="graphql",
             )
 
-            # -------------------------------------------------
-            # Process video first
-            # -------------------------------------------------
+            # ------------------------------------------------
+            # VIDEO
+            # ------------------------------------------------
 
             if video_url:
 
@@ -391,14 +218,14 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str) -> di
                         )
 
                     return {
-                        "media_local_path": poster_path or (frame_paths[0] if frame_paths else None),
+                        "media_local_path": poster_path or frame_paths[0],
                         "frame_paths": frame_paths,
                         "frame_metadata": frame_metadata,
                     }
 
-            # -------------------------------------------------
-            # Static image fallback
-            # -------------------------------------------------
+            # ------------------------------------------------
+            # IMAGE
+            # ------------------------------------------------
 
             if image_url:
 
@@ -431,228 +258,142 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str) -> di
 
             return None
 
-            logger.info(
-                "snapshot_html_debug",
-                ad_id=ad_archive_id,
-                html_size=len(html),
-                contains_fbcdn=("fbcdn" in html),
-                contains_video_tag=("<video" in html),
-                contains_img_tag=("<img" in html),
-            )
 
+# ---------------------------------------------------------
+# IMAGE DOWNLOAD
+# ---------------------------------------------------------
 
-# ── Image Download ─────────────────────────────────────────────────────────────
+async def download_image(url: str, ad_archive_id: str, filename="image.jpg"):
 
-async def download_image(url: str, ad_archive_id: str, filename: str = "image.jpg") -> str | None:
-    """Download a static image from a signed CDN URL."""
     ad_dir = _ensure_ad_dir(ad_archive_id)
     output_path = ad_dir / filename
 
     try:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-            response = await client.get(url, headers={"User-Agent": SNAPSHOT_HEADERS["User-Agent"]})
-            response.raise_for_status()
 
-            # Sanity check: make sure we got an image, not HTML
-            content_type = response.headers.get("content-type", "")
-            if "text/html" in content_type:
-                logger.warning("image_url_returned_html", ad_id=ad_archive_id, url=url[:80])
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+
+            r = await client.get(url)
+
+            if r.status_code != 200:
                 return None
 
             with open(output_path, "wb") as f:
-                f.write(response.content)
+                f.write(r.content)
 
-            metrics.increment("images_downloaded")
-            logger.info("image_downloaded", ad_id=ad_archive_id, size=len(response.content))
-            return str(output_path)
-    except Exception as exc:
-        logger.error("image_download_failed", ad_id=ad_archive_id, error=str(exc))
+        metrics.increment("images_downloaded")
+
+        return str(output_path)
+
+    except Exception as e:
+
+        logger.error("image_download_failed", error=str(e))
         return None
 
 
-# ── Video Download + Frame Extraction ─────────────────────────────────────────
+# ---------------------------------------------------------
+# VIDEO DOWNLOAD
+# ---------------------------------------------------------
 
-async def download_video(video_url: str, ad_archive_id: str) -> str | None:
-    """
-    Download a video from a signed fbcdn CDN URL.
-    Uses httpx directly (not yt-dlp) since fbcdn URLs are direct MP4 links.
-    Falls back to yt-dlp for non-direct URLs.
-    """
+async def download_video(video_url: str, ad_archive_id: str):
+
     ad_dir = _ensure_ad_dir(ad_archive_id)
     output_path = ad_dir / "video.mp4"
 
-    # Try direct download first (fbcdn URLs are direct MP4s)
-    if "fbcdn.net" in video_url or "fbcdn.com" in video_url:
-        try:
-            async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
-                async with client.stream("GET", video_url, headers={"User-Agent": SNAPSHOT_HEADERS["User-Agent"]}) as response:
-                    response.raise_for_status()
-                    content_type = response.headers.get("content-type", "")
-                    if "video" not in content_type and "octet-stream" not in content_type:
-                        logger.warning("video_url_wrong_content_type", content_type=content_type)
-                        # Fall through to yt-dlp
-                    else:
-                        with open(output_path, "wb") as f:
-                            async for chunk in response.aiter_bytes(chunk_size=1024 * 64):
-                                f.write(chunk)
-                        if output_path.exists() and output_path.stat().st_size > 10_000:
-                            metrics.increment("videos_downloaded_direct")
-                            logger.info("video_downloaded_direct", ad_id=ad_archive_id)
-                            return str(output_path)
-        except Exception as exc:
-            logger.warning("direct_video_download_failed", ad_id=ad_archive_id, error=str(exc))
-            # Fall through to yt-dlp
-
-    # yt-dlp fallback
     try:
-        process = await asyncio.create_subprocess_exec(
-            "yt-dlp", "--no-warnings",
-            "-o", str(output_path),
-            "--format", "best[ext=mp4]/best",
-            video_url,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
-        if process.returncode != 0:
-            logger.error("yt_dlp_failed", ad_id=ad_archive_id, stderr=stderr.decode()[:200])
-            return None
-        if output_path.exists() and output_path.stat().st_size > 10_000:
-            metrics.increment("videos_downloaded_ytdlp")
+
+        async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
+
+            async with client.stream("GET", video_url) as r:
+
+                if r.status_code != 200:
+                    return None
+
+                with open(output_path, "wb") as f:
+                    async for chunk in r.aiter_bytes():
+                        f.write(chunk)
+
+        if output_path.exists():
+            metrics.increment("videos_downloaded_direct")
             return str(output_path)
+
         return None
-    except asyncio.TimeoutError:
-        logger.error("video_download_timeout", ad_id=ad_archive_id)
-        return None
-    except Exception as exc:
-        logger.error("video_download_error", ad_id=ad_archive_id, error=str(exc))
+
+    except Exception as e:
+
+        logger.error("video_download_error", error=str(e))
         return None
 
 
-async def get_video_duration(video_path: str) -> float | None:
-    try:
-        process = await asyncio.create_subprocess_exec(
-            "ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", video_path,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await asyncio.wait_for(process.communicate(), timeout=30)
-        data = json.loads(stdout.decode())
-        for stream in data.get("streams", []):
-            if stream.get("codec_type") == "video":
-                duration = stream.get("duration")
-                if duration:
-                    return float(duration)
-        return None
-    except Exception as exc:
-        logger.error("ffprobe_error", video_path=video_path, error=str(exc))
-        return None
+# ---------------------------------------------------------
+# FRAME EXTRACTION
+# ---------------------------------------------------------
 
+async def extract_frames(video_path: str, ad_archive_id: str):
 
-async def extract_frames(video_path: str, ad_archive_id: str) -> list[FrameMeta]:
-    """Extract scene-change-aware frames from a video using ffmpeg."""
     ad_dir = _ensure_ad_dir(ad_archive_id)
     output_dir = str(ad_dir)
-    threshold = settings.SCENE_CHANGE_THRESHOLD
 
     frames_pattern = os.path.join(output_dir, "frame_%03d.jpg")
-    scene_log_path = os.path.join(output_dir, "scene_log.txt")
 
-    try:
-        with open(scene_log_path, "w") as log_f:
-            process = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-y", "-i", video_path,
-                "-vf", f"select='gte(scene,{threshold})',scale=1280:-1,showinfo",
-                "-vsync", "vfr", "-frame_pts", "true",
-                frames_pattern,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=log_f,
-            )
-            await asyncio.wait_for(process.communicate(), timeout=120)
-    except (asyncio.TimeoutError, Exception) as exc:
-        logger.error("frame_extraction_error", ad_id=ad_archive_id, error=str(exc))
+    process = await asyncio.create_subprocess_exec(
+        "ffmpeg",
+        "-y",
+        "-i",
+        video_path,
+        "-vf",
+        "select='gt(scene,0.3)',scale=1280:-1",
+        "-vsync",
+        "vfr",
+        frames_pattern,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
 
-    # Parse extracted frames
+    await process.communicate()
+
+    frames = []
+
     frame_files = sorted(Path(output_dir).glob("frame_*.jpg"))
-    frames: list[FrameMeta] = []
 
-    if frame_files:
-        try:
-            with open(scene_log_path, "r", errors="replace") as f:
-                log_content = f.read()
-            pts_times = re.findall(r"pts_time:\s*([\d.]+)", log_content)
-            for i, frame_file in enumerate(frame_files):
-                ts = float(pts_times[i]) if i < len(pts_times) else float(i)
-                frames.append(FrameMeta(
-                    path=str(frame_file), timestamp_sec=ts,
-                    scene_score=0.30, index=i, is_hook=ts < 2.0,
-                ))
-        except Exception:
-            frames = [
-                FrameMeta(path=str(f), timestamp_sec=float(i), scene_score=0.30, index=i, is_hook=i == 0)
-                for i, f in enumerate(frame_files)
-            ]
+    for i, f in enumerate(frame_files):
 
-    # Always ensure we have a hook frame (first frame)
-    if not any(f.timestamp_sec < 0.5 for f in frames):
-        hook_path = os.path.join(output_dir, "frame_000_hook.jpg")
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "ffmpeg", "-y", "-i", video_path,
-                "-vf", "select='eq(n,0)',scale=1280:-1", "-vframes", "1", hook_path,
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        frames.append(
+            FrameMeta(
+                path=str(f),
+                timestamp_sec=float(i),
+                scene_score=0.3,
+                index=i,
+                is_hook=i == 0,
             )
-            await asyncio.wait_for(proc.communicate(), timeout=30)
-            if os.path.exists(hook_path):
-                frames.insert(0, FrameMeta(path=hook_path, timestamp_sec=0.0, scene_score=1.0, index=0, is_hook=True))
-        except Exception:
-            pass
-
-    # Fallback to uniform sampling if scene detection yielded nothing
-    if len(frames) < 2:
-        duration = await get_video_duration(video_path)
-        if duration:
-            for i, pct in enumerate([0.0, 0.5, 0.9]):
-                ts = duration * pct
-                fp = os.path.join(output_dir, f"frame_uniform_{i:03d}.jpg")
-                try:
-                    proc = await asyncio.create_subprocess_exec(
-                        "ffmpeg", "-y", "-ss", str(ts), "-i", video_path,
-                        "-vf", "scale=1280:-1", "-vframes", "1", fp,
-                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                    )
-                    await asyncio.wait_for(proc.communicate(), timeout=15)
-                    if os.path.exists(fp):
-                        frames.append(FrameMeta(path=fp, timestamp_sec=round(ts, 2), scene_score=0.0, index=i, is_hook=ts < 2.0))
-                except Exception:
-                    pass
-
-    frames = frames[:settings.MAX_FRAMES]
-    for i, f in enumerate(frames):
-        f.index = i
+        )
 
     metrics.increment("video_frames_extracted", len(frames))
-    logger.info("frames_extracted", ad_id=ad_archive_id, count=len(frames))
+
     return frames
 
 
-async def download_and_extract_frames(video_url: str, ad_archive_id: str) -> tuple[list[str], list[dict]] | None:
-    """Full pipeline: download video → extract frames → delete source video."""
+async def download_and_extract_frames(video_url: str, ad_archive_id: str):
+
     video_path = await download_video(video_url, ad_archive_id)
+
     if not video_path:
         return None
 
     frames = await extract_frames(video_path, ad_archive_id)
-    if not frames:
-        return None
 
     frame_paths = [f.path for f in frames]
+
     frame_metadata = [
-        {"path": f.path, "timestamp_sec": f.timestamp_sec, "scene_score": f.scene_score,
-         "index": f.index, "is_hook": f.is_hook}
+        {
+            "path": f.path,
+            "timestamp_sec": f.timestamp_sec,
+            "scene_score": f.scene_score,
+            "index": f.index,
+            "is_hook": f.is_hook,
+        }
         for f in frames
     ]
 
-    # Delete source video to save disk space
     try:
         os.remove(video_path)
     except OSError:
