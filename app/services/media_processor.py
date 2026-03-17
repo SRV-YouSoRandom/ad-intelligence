@@ -108,76 +108,38 @@ def _extract_bbox_media(html: str):
 
 def _extract_media_candidates(html: str):
 
-    soup = BeautifulSoup(html, "html.parser")
-
     video_url = None
     image_url = None
-
-    # ---------------------------------------------------------
-    # DEBUG: log first 10 image tags so we see what HTML contains
-    # ---------------------------------------------------------
-
-    for img in soup.find_all("img")[:10]:
-        logger.info(
-            "img_candidate_debug",
-            src=img.get("src"),
-            referrerpolicy=img.get("referrerpolicy"),
-            class_name=img.get("class"),
-        )
 
     # ---------------------------------------------------------
     # VIDEO detection
     # ---------------------------------------------------------
 
-    video_tag = soup.find("video")
+    m = re.search(r"https://[^\"']+\.mp4[^\"']*", html)
 
-    if video_tag:
+    if m:
+        video_url = m.group(0)
+        logger.info("video_regex_detected", video_url=video_url)
 
-        source = video_tag.find("source")
+    # ---------------------------------------------------------
+    # IMAGE detection (fbcdn creative)
+    # ---------------------------------------------------------
 
-        if source and source.get("src"):
-            video_url = source["src"]
+    fbcdn_images = re.findall(
+        r"https://scontent[^\"']+fbcdn\.net[^\"']+\.(?:jpg|jpeg|png|webp)[^\"']*",
+        html
+    )
 
-        if video_tag.get("poster"):
-            image_url = video_tag["poster"]
+    if fbcdn_images:
+
+        # first one is almost always the creative
+        image_url = fbcdn_images[0]
 
         logger.info(
-            "video_tag_detected",
-            video_url=video_url,
-            poster=image_url
+            "fbcdn_image_detected",
+            candidate_count=len(fbcdn_images),
+            selected=image_url
         )
-
-    # ---------------------------------------------------------
-    # IMAGE detection (creative)
-    # ---------------------------------------------------------
-
-    if not image_url:
-
-        creative_img = soup.find("img", {"referrerpolicy": "origin-when-cross-origin"})
-
-        if creative_img:
-
-            logger.info(
-                "creative_img_detected",
-                tag=str(creative_img)[:500]
-            )
-
-            if creative_img.get("src"):
-                image_url = creative_img["src"]
-
-    # ---------------------------------------------------------
-    # REGEX FALLBACKS
-    # ---------------------------------------------------------
-
-    if not video_url:
-        m = FBCDN_VIDEO_RE.search(html)
-        if m:
-            video_url = m.group(0)
-
-    if not image_url:
-        m = FBCDN_IMAGE_RE.search(html)
-        if m:
-            image_url = m.group(0)
 
     return image_url, video_url
 
