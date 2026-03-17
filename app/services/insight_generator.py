@@ -69,7 +69,7 @@ def _detect_ad_context(ad) -> str:
     caption = (ad.caption or "").lower()
 
     political_keywords = [
-        "party", "bjp", "congress", "election", "vote", "manifesto",
+        "party", "election", "vote", "manifesto",
         "campaign", "political", "neta", "sarkar", "modi", "rahul",
         "gandhi", "government", "minister", "mp ", "mla ",
         "lok sabha", "rajya sabha", "phir ek baar", "viksit bharat",

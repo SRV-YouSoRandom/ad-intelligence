@@ -290,81 +290,190 @@ def _extract_media_candidates(html: str) -> tuple[str | None, str | None]:
 
 async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str) -> dict | None:
     """
-    Fetch media from a Meta ad snapshot URL.
+    Fetch media from Meta Ads Library using the internal GraphQL endpoint.
 
-    Tries three extraction strategies in order:
-    1. JSON blobs embedded in <script> tags (most reliable, gets video)
-    2. og:image / og:video meta tags (server-side, always present)
-    3. Regex scan for fbcdn CDN URLs (brute force fallback)
+    This avoids scraping the React snapshot page and instead queries the same
+    API the Ads Library frontend uses to fetch creative assets.
 
-    Returns dict with media_local_path, frame_paths, frame_metadata, or None.
+    Returns:
+        {
+            media_local_path,
+            frame_paths,
+            frame_metadata
+        }
     """
+
     async with _get_semaphore():
+
         try:
+
+            # -------------------------------------------------
+            # Extract ad_archive_id
+            # -------------------------------------------------
+
+            match = re.search(r"id=(\d+)", snapshot_url)
+            if match:
+                ad_archive_id = match.group(1)
+
+            # -------------------------------------------------
+            # GraphQL endpoint used by Ads Library frontend
+            # -------------------------------------------------
+
+            graphql_url = "https://www.facebook.com/api/graphql/"
+
+            payload = {
+                "doc_id": "24394279933530446",
+                "variables": json.dumps({
+                    "adArchiveID": ad_archive_id
+                })
+            }
+
+            headers = {
+                "User-Agent": SNAPSHOT_HEADERS["User-Agent"],
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "*/*",
+                "Origin": "https://www.facebook.com",
+                "Referer": snapshot_url,
+            }
+
             async with httpx.AsyncClient(
-                timeout=45,
+                timeout=30,
                 follow_redirects=True,
-                headers=SNAPSHOT_HEADERS,
+                headers=headers,
             ) as client:
-                response = await client.get(snapshot_url)
+
+                response = await client.post(graphql_url, data=payload)
 
                 if response.status_code != 200:
                     logger.warning(
-                        "snapshot_fetch_failed",
+                        "graphql_fetch_failed",
                         ad_id=ad_archive_id,
                         status=response.status_code,
                     )
                     return None
 
-                html = response.text
+                data = response.json()
 
-            # --- Exhaustive Candidate Extraction & Ranking ---
-            image_url, video_url = _extract_media_candidates(html)
-            method = "ranked_candidates"
+            # -------------------------------------------------
+            # Walk JSON to find media URLs
+            # -------------------------------------------------
+
+            video_url = None
+            image_url = None
+
+            def walk(obj):
+
+                nonlocal video_url, image_url
+
+                if isinstance(obj, dict):
+
+                    for k, v in obj.items():
+
+                        if isinstance(v, str):
+
+                            if "video_hd_url" in k or "video_sd_url" in k:
+                                if v and not video_url:
+                                    video_url = v
+
+                            if "image_url" in k or "original_image_url" in k:
+                                if v and not image_url:
+                                    image_url = v
+
+                        walk(v)
+
+                elif isinstance(obj, list):
+
+                    for item in obj:
+                        walk(item)
+
+            walk(data)
+
+            # -------------------------------------------------
+            # If nothing found, fallback to HTML extractor
+            # -------------------------------------------------
 
             if not image_url and not video_url:
-                # Diagnostic logging: log snippet of the HTML to help debug "no media" states
-                snippet = html[:1000].replace("\n", " ")
-                
-                # Check if keywords even exist in the raw text
-                has_keywords = "fbcdn" in html or "scontent" in html or "video" in html
-                
+
                 logger.warning(
-                    "snapshot_no_media_found", 
-                    ad_id=ad_archive_id, 
-                    html_size=len(html),
-                    has_media_keywords=has_keywords,
-                    html_snippet=snippet
+                    "graphql_no_media_found_fallback_html",
+                    ad_id=ad_archive_id,
+                )
+
+                async with httpx.AsyncClient(
+                    timeout=45,
+                    follow_redirects=True,
+                    headers=SNAPSHOT_HEADERS,
+                ) as client:
+
+                    response = await client.get(snapshot_url)
+
+                    if response.status_code != 200:
+                        return None
+
+                    html = response.text
+
+                image_url, video_url = _extract_media_candidates(html)
+
+            if not image_url and not video_url:
+
+                logger.warning(
+                    "snapshot_no_media_found",
+                    ad_id=ad_archive_id,
                 )
                 return None
 
             logger.info(
-                "snapshot_media_found",
+                "media_found",
                 ad_id=ad_archive_id,
                 has_video=bool(video_url),
                 has_image=bool(image_url),
-                method=method,
+                method="graphql",
             )
 
-            # Process video first (more valuable for analysis)
+            # -------------------------------------------------
+            # Process video first
+            # -------------------------------------------------
+
             if video_url:
+
                 result = await download_and_extract_frames(video_url, ad_archive_id)
+
                 if result:
+
                     frame_paths, frame_metadata = result
-                    # Also save the poster/thumbnail if we have it
+
                     poster_path = None
+
                     if image_url:
-                        poster_path = await download_image(image_url, ad_archive_id, filename="poster.jpg")
+                        poster_path = await download_image(
+                            image_url,
+                            ad_archive_id,
+                            filename="poster.jpg"
+                        )
+
                     return {
                         "media_local_path": poster_path or (frame_paths[0] if frame_paths else None),
                         "frame_paths": frame_paths,
                         "frame_metadata": frame_metadata,
                     }
 
-            # Static image
+            # -------------------------------------------------
+            # Static image fallback
+            # -------------------------------------------------
+
             if image_url:
-                local_path = await download_image(image_url, ad_archive_id)
+
+                ext = image_url.split("?")[0].split(".")[-1]
+                filename = f"image.{ext}"
+
+                local_path = await download_image(
+                    image_url,
+                    ad_archive_id,
+                    filename=filename
+                )
+
                 if local_path:
+
                     return {
                         "media_local_path": local_path,
                         "frame_paths": None,
@@ -374,7 +483,13 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str) -> di
             return None
 
         except Exception as exc:
-            logger.error("snapshot_fetch_error", ad_id=ad_archive_id, error=str(exc))
+
+            logger.error(
+                "snapshot_fetch_error",
+                ad_id=ad_archive_id,
+                error=str(exc),
+            )
+
             return None
 
 

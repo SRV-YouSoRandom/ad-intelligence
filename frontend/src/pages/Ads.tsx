@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useSearchParams, Link } from 'react-router-dom';
-import { useAds } from '../api';
+import { useAds, getMediaUrl } from '../api';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
 import { Select } from '../components/ui/Select';
@@ -18,6 +18,7 @@ export interface Ad {
   end_date: string | null;
   impressions_mid: number | null;
   performance_label: string | null;
+  media_local_path: string | null;
 }
 
 const labelStyle: React.CSSProperties = {
@@ -170,9 +171,17 @@ export const Ads = () => {
                           width: 38, height: 38, borderRadius: 8, flexShrink: 0,
                           backgroundColor: 'var(--bg-surface-hover)', border: '1px solid var(--border-subtle)',
                           display: 'flex', alignItems: 'center', justifyContent: 'center',
-                          color: 'var(--text-tertiary)',
+                          color: 'var(--text-tertiary)', overflow: 'hidden'
                         }}>
-                          {getTypeIcon(ad.ad_type)}
+                          {ad.media_local_path ? (
+                            <img 
+                              src={getMediaUrl(ad.media_local_path) || ''}
+                              alt=""
+                              style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                            />
+                          ) : (
+                            getTypeIcon(ad.ad_type)
+                          )}
                         </div>
                         <div style={{ minWidth: 0 }}>
                           <p style={{ fontWeight: 500, fontSize: '0.875rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: 260, margin: 0 }}>

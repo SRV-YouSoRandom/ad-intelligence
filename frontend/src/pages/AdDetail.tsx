@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
-import { useAdDetail, useInsights, useJobPoll, generateInsight, deleteInsight } from '../api';
+import { useAdDetail, useInsights, useJobPoll, generateInsight, deleteInsight, getMediaUrl } from '../api';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
 import {
@@ -67,50 +67,66 @@ const ConfidenceDots = ({ level }: { level: string }) => {
 
 // ── Snapshot preview ──────────────────────────────────────────────────────────
 
-const SnapshotPreview = ({ snapshotUrl, mediaLocalPath }: { snapshotUrl?: string; mediaLocalPath?: string }) => {
-  const [imgError, setImgError] = useState(false);
+interface SnapshotPreviewProps {
+  ad: {
+    snapshot_url?: string;
+    media_local_path?: string;
+    ad_type?: string;
+    frame_paths?: string[];
+  };
+}
 
-  // Try to show the locally stored image first (served via API)
-  // Fall back to snapshot URL as iframe, fall back to link-only
-  const localImgUrl = mediaLocalPath
-    ? `${import.meta.env.VITE_API_URL?.replace('/api/v1', '')}/media/${mediaLocalPath.split('/media_storage/').pop()}`
-    : null;
+const SnapshotPreview = ({ ad }: SnapshotPreviewProps) => {
+  const [mediaError, setMediaError] = useState(false);
+  const { snapshot_url, media_local_path, ad_type } = ad;
 
-  if (localImgUrl && !imgError) {
+  const mediaUrl = getMediaUrl(media_local_path);
+  const posterUrl = ad.frame_paths?.[0] ? getMediaUrl(ad.frame_paths[0]) : undefined;
+
+  const isVideo = ad_type === 'VIDEO';
+
+  if (mediaUrl && !mediaError) {
     return (
-      <div style={{ marginBottom: 'var(--space-4)' }}>
-        <img
-          src={localImgUrl}
-          alt="Ad creative"
-          onError={() => setImgError(true)}
-          style={{
-            width: '100%', borderRadius: 8, border: '1px solid var(--border-subtle)',
-            objectFit: 'contain', maxHeight: 280, backgroundColor: 'var(--bg-surface-hover)',
-          }}
-        />
+      <div style={{ marginBottom: 'var(--space-4)', overflow: 'hidden', borderRadius: 8, border: '1px solid var(--border-subtle)', backgroundColor: 'var(--bg-surface-hover)' }}>
+        {isVideo ? (
+          <video
+            src={mediaUrl}
+            controls
+            poster={posterUrl || undefined}
+            onError={() => setMediaError(true)}
+            style={{ width: '100%', display: 'block', maxHeight: 350 }}
+          />
+        ) : (
+          <img
+            src={mediaUrl}
+            alt="Ad creative"
+            onError={() => setMediaError(true)}
+            style={{ width: '100%', display: 'block', objectFit: 'contain', maxHeight: 350 }}
+          />
+        )}
       </div>
     );
   }
 
-  if (snapshotUrl) {
+  if (snapshot_url) {
     return (
       <div style={{ marginBottom: 'var(--space-4)' }}>
         <a
-          href={snapshotUrl}
+          href={snapshot_url}
           target="_blank"
           rel="noreferrer"
           style={{
             display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
-            width: '100%', minHeight: 120, borderRadius: 8,
+            width: '100%', minHeight: 140, borderRadius: 8,
             border: '1.5px dashed var(--border-subtle)', backgroundColor: 'var(--bg-surface-hover)',
             color: 'var(--text-secondary)', gap: 8, textDecoration: 'none',
-            transition: 'all var(--transition-fast)',
+            transition: 'all var(--transition-fast)', position: 'relative'
           }}
           onMouseEnter={e => { e.currentTarget.style.backgroundColor = '#f0f5ff'; e.currentTarget.style.borderColor = 'var(--status-info-text)'; }}
           onMouseLeave={e => { e.currentTarget.style.backgroundColor = 'var(--bg-surface-hover)'; e.currentTarget.style.borderColor = 'var(--border-subtle)'; }}
         >
-          <ImageIcon size={24} style={{ opacity: 0.4 }} />
-          <span style={{ fontSize: '0.8rem', fontWeight: 500 }}>View creative in Meta Library</span>
+          {isVideo ? <Video size={24} style={{ opacity: 0.4 }} /> : <ImageIcon size={24} style={{ opacity: 0.4 }} />}
+          <span style={{ fontSize: '0.8rem', fontWeight: 500 }}>View {isVideo ? 'video' : 'creative'} in Meta Library</span>
           <span style={{ fontSize: '0.72rem', opacity: 0.6 }}>Opens in new tab</span>
           <ExternalLink size={12} style={{ position: 'absolute', top: 8, right: 8, opacity: 0.4 }} />
         </a>
@@ -118,7 +134,15 @@ const SnapshotPreview = ({ snapshotUrl, mediaLocalPath }: { snapshotUrl?: string
     );
   }
 
-  return null;
+  return (
+    <div style={{ 
+      marginBottom: 'var(--space-4)', width: '100%', minHeight: 100, borderRadius: 8,
+      border: '1px solid var(--border-subtle)', backgroundColor: 'var(--bg-surface-hover)',
+      display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-tertiary)', fontSize: '0.75rem'
+    }}>
+      No creative available
+    </div>
+  );
 };
 
 // ── Factor Card ───────────────────────────────────────────────────────────────
@@ -265,7 +289,7 @@ export const AdDetail = () => {
             </div>
 
             {/* Snapshot preview — new */}
-            <SnapshotPreview snapshotUrl={ad.snapshot_url} mediaLocalPath={ad.media_local_path} />
+            <SnapshotPreview ad={ad} />
 
             {ad.snapshot_url && (
               <a href={ad.snapshot_url} target="_blank" rel="noreferrer"

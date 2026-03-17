@@ -1,6 +1,19 @@
 import useSWR from 'swr';
 
 export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://173.249.22.107:8000/api/v1';
+export const BASE_URL = API_BASE_URL.replace(/\/api\/v1\/?$/, '');
+
+export const getMediaUrl = (localPath: string | null | undefined) => {
+  if (!localPath) return null;
+  const parts = localPath.split(/[/\\]/);
+  if (parts.length >= 2) {
+    const relPath = parts.slice(-2).join('/');
+    const url = `${BASE_URL}/media/${relPath}`;
+    console.debug(`[Media] Derived URL: ${url} from ${localPath}`);
+    return url;
+  }
+  return null;
+};
 
 export interface FetchError extends Error {
   info?: unknown;
