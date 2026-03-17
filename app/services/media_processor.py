@@ -203,6 +203,11 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str):
                 follow_redirects=True,
             ) as client:
 
+                # Force Facebook to return static HTML instead of React shell
+                if "_fb_noscript=1" not in snapshot_url:
+                    separator = "&" if "?" in snapshot_url else "?"
+                    snapshot_url = snapshot_url + f"{separator}_fb_noscript=1"
+
                 response = await client.get(snapshot_url, headers=SNAPSHOT_HEADERS)
 
                 if response.status_code != 200:
