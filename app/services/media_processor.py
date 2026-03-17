@@ -434,3 +434,59 @@ async def download_and_extract_frames(video_url: str, ad_archive_id: str):
         pass
 
     return frame_paths, frame_metadata
+
+# ---------------------------------------------------------
+# DEFERRED MEDIA PROCESSING
+# ---------------------------------------------------------
+
+async def process_deferred_media(snapshot_url: str, ad_archive_id: str):
+    """
+    Called during insight generation to fetch media URLs via Playwright,
+    then downloads them and extracts frames.
+    """
+    logger.info("deferred_media_processing_started", ad_id=ad_archive_id, url=snapshot_url)
+    
+    from app.services.playwright_fetcher import fetch_media_urls_with_playwright
+    image_url, video_url = await fetch_media_urls_with_playwright(snapshot_url)
+    
+    if not image_url and not video_url:
+        logger.warning("deferred_media_no_media_found", ad_id=ad_archive_id)
+        return None
+        
+    logger.info("deferred_media_found", ad_id=ad_archive_id, has_video=bool(video_url), has_image=bool(image_url))
+    
+    # ------------------------------------------------
+    # VIDEO
+    # ------------------------------------------------
+    if video_url:
+        result = await download_and_extract_frames(video_url, ad_archive_id)
+        if result:
+            frame_paths, frame_metadata = result
+            poster_path = None
+            if image_url:
+                poster_path = await download_image(image_url, ad_archive_id, filename="poster.jpg")
+                
+            return {
+                "media_local_path": poster_path or frame_paths[0],
+                "frame_paths": frame_paths,
+                "frame_metadata": frame_metadata,
+            }
+            
+    # ------------------------------------------------
+    # IMAGE
+    # ------------------------------------------------
+    if image_url:
+        ext = image_url.split("?")[0].split(".")[-1]
+        if len(ext) > 4 or not ext.isalnum():
+            ext = "jpg"
+        filename = f"image.{ext}"
+        
+        local_path = await download_image(image_url, ad_archive_id, filename=filename)
+        if local_path:
+            return {
+                "media_local_path": local_path,
+                "frame_paths": None,
+                "frame_metadata": None,
+            }
+            
+    return None

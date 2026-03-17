@@ -189,14 +189,14 @@ async def _process_batch(ad_batch: list[dict], brand_id) -> int:
             frame_metadata = None
             is_video_signal = False
 
-            if snapshot_url:
-                media_result = await fetch_media_from_snapshot(snapshot_url, ad_archive_id)
-                if media_result:
-                    media_local_path = media_result.get("media_local_path")
-                    frame_paths = media_result.get("frame_paths")
-                    frame_metadata = media_result.get("frame_metadata")
-                    if (frame_paths and len(frame_paths) > 0) or (media_local_path and media_local_path.lower().endswith((".mp4", ".mov", ".m4v"))):
-                        is_video_signal = True
+            media_local_path = None
+            frame_paths = None
+            frame_metadata = None
+            is_video_signal = False
+
+            # Media fetching is DEFERRED to generate_insights phase to avoid rate limits
+            # and Playwright overhead during bulk ingestion
+
 
             ad_type, classification_method = await classify_ad(ad_raw, media_local_path, is_video_signal)
 

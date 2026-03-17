@@ -42,6 +42,34 @@ async def run_generate_insights(job_id: str, payload: dict) -> None:
         if not ad:
             raise ValueError(f"Ad not found: {ad_id}")
 
+        if ad.snapshot_url and not ad.media_local_path:
+            logger.info("fetching_deferred_media", ad_id=ad_id)
+            from app.services.media_processor import process_deferred_media
+            
+            media_result = await process_deferred_media(ad.snapshot_url, ad.ad_archive_id)
+            
+            if media_result:
+                ad.media_local_path = media_result.get("media_local_path")
+                ad.frame_paths = media_result.get("frame_paths")
+                ad.frame_metadata = media_result.get("frame_metadata")
+                
+                is_video_signal = False
+                if (ad.frame_paths and len(ad.frame_paths) > 0) or (ad.media_local_path and ad.media_local_path.lower().endswith((".mp4", ".mov", ".m4v", ".webm"))):
+                    is_video_signal = True
+                    
+                ad.ad_type = "VIDEO" if is_video_signal else "STATIC"
+                
+                async with async_session_factory() as update_db:
+                    await update_db.execute(
+                        update(Ad).where(Ad.id == ad_id).values(
+                            media_local_path=ad.media_local_path,
+                            frame_paths=ad.frame_paths,
+                            frame_metadata=ad.frame_metadata,
+                            ad_type=ad.ad_type
+                        )
+                    )
+                    await update_db.commit()
+
         insight_result = await generate_insight(ad)
 
         async with async_session_factory() as db:
