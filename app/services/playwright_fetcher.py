@@ -32,10 +32,10 @@ async def fetch_media_urls_with_playwright(snapshot_url: str) -> tuple[str | Non
             page = await context.new_page()
             
             # Go to snapshot url, wait until the page has finished rendering DOM
-            await page.goto(snapshot_url, wait_until="domcontentloaded", timeout=30000)
+            await page.goto(snapshot_url, wait_until="networkidle", timeout=45000)
             
-            # Wait briefly for React/scripts to populate `<video>` or `<img>`
-            await page.wait_for_timeout(3000)
+            # Wait longer for React/scripts to fully populate `<video>` or `<img>` layouts
+            await page.wait_for_timeout(5000)
             
             # 1. Try to find a video tag first (Video Ad)
             video_element = await page.query_selector("video")
@@ -52,17 +52,25 @@ async def fetch_media_urls_with_playwright(snapshot_url: str) -> tuple[str | Non
                         image_url = src
                         break
 
-                # Fallback: scan all images for ones looking like the ad content
+                # Fallback: find the largest image on the screen (highest area)
                 if not image_url:
                     images = await page.query_selector_all("img")
+                    largest_area = 0
+                    
                     for img in images:
                         src = await img.get_attribute("src")
                         if not src:
                             continue
-                        # Heuristic to skip profile pictures, icons and meta tracking pixels
-                        if "fbcdn" in src and "cp0" not in src and "p74x74" not in src:
-                            image_url = src
-                            break
+                            
+                        # Heuristic to only consider facebook CDNs
+                        if "fbcdn" in src or "scontent" in src:
+                            box = await img.bounding_box()
+                            if box:
+                                area = box["width"] * box["height"]
+                                # Must be reasonably sized (ignore tiny 10x10 tracking pixels or icons)
+                                if area > 20000 and area > largest_area:
+                                    largest_area = area
+                                    image_url = src
 
             await browser.close()
             

@@ -389,20 +389,25 @@ async def extract_frames(video_path: str, ad_archive_id: str):
     duration = await _get_video_duration(video_path)
     
     # Adaptive extraction logic based on duration
+    interval = 1.0  # Default fallback
     if duration <= 10.0:
         # Short: 1 frame every 2s
         vf_filter = "fps=1/2,scale=1280:-1"
+        interval = 2.0
     elif duration <= 30.0:
         # Medium: 1 frame every 4s
         vf_filter = "fps=1/4,scale=1280:-1"
+        interval = 4.0
     elif duration <= 60.0:
         # Long: 1 frame every 8s
         vf_filter = "fps=1/8,scale=1280:-1"
+        interval = 8.0
     else:
         # Extra Long: 1 frame every 12s
         vf_filter = "fps=1/12,scale=1280:-1"
+        interval = 12.0
         
-    logger.info("extracting_frames", ad_id=ad_archive_id, duration=duration, filter=vf_filter)
+    logger.info("extracting_frames", ad_id=ad_archive_id, duration=duration, filter=vf_filter, interval=interval)
 
     process = await asyncio.create_subprocess_exec(
         "ffmpeg",
@@ -426,11 +431,14 @@ async def extract_frames(video_path: str, ad_archive_id: str):
 
     for i, f in enumerate(frame_files):
 
+        # Multiply index by extraction interval to get approximate sequence time
+        timestamp = float(i * interval)
+
         frames.append(
             FrameMeta(
                 path=str(f),
-                timestamp_sec=float(i),
-                scene_score=0.3,
+                timestamp_sec=timestamp,
+                scene_score=0.3, # Static score since we are using fps filter instead of scene
                 index=i,
                 is_hook=i == 0,
             )

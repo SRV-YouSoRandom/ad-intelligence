@@ -93,14 +93,20 @@ const SnapshotPreview = ({ ad }: SnapshotPreviewProps) => {
             src={mediaUrl}
             controls
             poster={posterUrl || undefined}
-            onError={() => setMediaError(true)}
+            onError={(e) => {
+              console.error("Video failed to load:", mediaUrl);
+              setMediaError(true);
+            }}
             style={{ width: '100%', display: 'block', maxHeight: 350 }}
           />
         ) : (
           <img
             src={mediaUrl}
             alt="Ad creative"
-            onError={() => setMediaError(true)}
+            onError={(e) => {
+               console.error("Image failed to load:", mediaUrl);
+               setMediaError(true);
+            }}
             style={{ width: '100%', display: 'block', objectFit: 'contain', maxHeight: 350 }}
           />
         )}
