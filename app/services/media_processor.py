@@ -18,9 +18,13 @@ _download_semaphore: asyncio.Semaphore | None = None
 
 SNAPSHOT_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
     "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
     "Referer": "https://www.facebook.com/ads/library/",
+    "Origin": "https://www.facebook.com",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
 }
 
 FBCDN_VIDEO_RE = re.compile(r"https://[^\"']+\.mp4[^\"']*")
@@ -154,7 +158,7 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str):
                 headers=SNAPSHOT_HEADERS
             ) as client:
 
-                response = await client.get(snapshot_url)
+                response = await client.get(snapshot_url, headers=SNAPSHOT_HEADERS)
 
                 if response.status_code != 200:
                     logger.warning(
