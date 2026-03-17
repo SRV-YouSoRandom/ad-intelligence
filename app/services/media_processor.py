@@ -46,24 +46,16 @@ _download_semaphore: asyncio.Semaphore | None = None
 # Headers that make the request look like a real browser visit.
 # Without these, Facebook returns a minimal non-JS fallback page.
 SNAPSHOT_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/122.0.0.0 Safari/537.36"
-    ),
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml",
     "Accept-Language": "en-US,en;q=0.9",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Cache-Control": "no-cache",
+    "Referer": "https://www.facebook.com/ads/library/",
 }
 
 # Regex to find signed fbcdn URLs anywhere in raw HTML
 # Loosened to be escaping-aware (handles https:\/\/ and http:\/\/)
-FBCDN_VIDEO_RE = re.compile(r'(https?:\\?/\\?/[^"\'\s]+\.(?:mp4|mov|m4v)[^"\'\s]*)')
-FBCDN_IMAGE_RE = re.compile(r'(https?:\\?/\\?/[^"\'\s]+\.(?:jpg|jpeg|png|webp|gif)[^"\'\s]*)')
+FBCDN_VIDEO_RE = re.compile(r'https://[^"\s]+\.mp4[^"\s]*')
+FBCDN_IMAGE_RE = re.compile(r'https://[^"\s]+\.(?:jpg|jpeg|png|webp)[^"\s]*')
 
 # Patterns that strongly suggest a profile picture or non-ad icon
 PROBABLE_PROFILE_PIC_PATTERNS = [
@@ -193,48 +185,41 @@ def _extract_media_candidates(html: str) -> tuple[str | None, str | None]:
     image_url = None
 
     # --- VIDEO ---
-    for video in soup.find_all("video"):
+    video = soup.find("video")
 
-        if video.get("src") and "fbcdn" in video["src"]:
+    if video:
+        if video.get("src"):
             video_url = video["src"]
-            break
 
-        for source in video.find_all("source"):
-            if source.get("src") and "fbcdn" in source["src"]:
+        else:
+            source = video.find("source")
+            if source and source.get("src"):
                 video_url = source["src"]
-                break
 
-        if video_url:
-            break
-
+        if video.get("poster") and not image_url:
+            image_url = video["poster"]
 
     # --- IMAGE ---
-    for img in soup.find_all("img"):
+    if not image_url:
 
-        src = img.get("src")
-        if not src:
-            continue
+        for img in soup.find_all("img"):
 
-        # Ignore profile icons
-        if "profile" in src or "s60x60" in src or "s40x40" in src:
-            continue
+            src = img.get("src")
+            if not src:
+                continue
 
-        if "fbcdn" in src or "scontent" in src:
-
-            # Ads library creative images contain t39.35426
-            if "t39.35426" in src or ".jpg" in src:
+            if "scontent" in src and "t39.35426" in src:
                 image_url = src
                 break
 
-
-    # --- fallback regex ---
+    # --- regex fallback ---
     if not video_url:
-        m = re.search(r"https://[^\"']+\.mp4[^\"']*", html)
+        m = FBCDN_VIDEO_RE.search(html)
         if m:
             video_url = m.group(0)
 
     if not image_url:
-        m = re.search(r"https://[^\"']+\.jpg[^\"']*", html)
+        m = FBCDN_IMAGE_RE.search(html)
         if m:
             image_url = m.group(0)
 
@@ -299,13 +284,13 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str) -> di
 
                 if response.status_code != 200:
                     logger.warning(
-                        "graphql_fetch_failed",
+                        "graphql_fetch_failed_using_html_fallback",
                         ad_id=ad_archive_id,
                         status=response.status_code,
                     )
-                    return None
-
-                data = response.json()
+                    data = {}
+                else:
+                    data = response.json()
 
             # -------------------------------------------------
             # Walk JSON to find media URLs
@@ -445,6 +430,15 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str) -> di
             )
 
             return None
+
+            logger.info(
+                "snapshot_html_debug",
+                ad_id=ad_archive_id,
+                html_size=len(html),
+                contains_fbcdn=("fbcdn" in html),
+                contains_video_tag=("<video" in html),
+                contains_img_tag=("<img" in html),
+            )
 
 
 # ── Image Download ─────────────────────────────────────────────────────────────
