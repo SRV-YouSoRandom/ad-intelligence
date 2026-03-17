@@ -106,14 +106,6 @@ def _extract_bbox_media(html: str):
 # HTML extractor
 # ---------------------------------------------------------
 
-for img in soup.find_all("img")[:10]:
-    logger.info(
-        "img_candidate",
-        src=img.get("src"),
-        referrerpolicy=img.get("referrerpolicy"),
-        class_name=img.get("class")
-    )
-
 def _extract_media_candidates(html: str):
 
     soup = BeautifulSoup(html, "html.parser")
@@ -148,14 +140,8 @@ def _extract_media_candidates(html: str):
 
         creative_img = soup.find("img", {"referrerpolicy": "origin-when-cross-origin"})
 
-        if creative_img:
-            logger.info(
-                "image_tag_detected",
-                tag=str(creative_img)[:500]
-            )
-
-            if creative_img and creative_img.get("src"):
-                image_url = creative_img["src"]
+        if creative_img and creative_img.get("src"):
+            image_url = creative_img["src"]
 
 
     # ---------------------------------------------------------
@@ -222,31 +208,17 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str):
                 contains_img_tag=("<img" in html),
             )
 
-            extractor_used = None
-
             # ---- Try JSON first ----
             image_url, video_url = _extract_bbox_media(html)
-
-            if image_url or video_url:
-                extractor_used = "bbox"
 
             # ---- fallback to HTML ----
             if not image_url and not video_url:
                 image_url, video_url = _extract_media_candidates(html)
-                extractor_used = "html"
 
             if not image_url and not video_url:
                 logger.warning(
                     "snapshot_no_media_found",
                     ad_id=ad_archive_id
-                )
-
-                logger.info(
-                    "snapshot_media_debug",
-                    ad_id=ad_archive_id,
-                    extractor=extractor_used,
-                    image_url=image_url,
-                    video_url=video_url
                 )
                 return None
 
