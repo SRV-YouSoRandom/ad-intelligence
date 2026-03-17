@@ -25,6 +25,12 @@ SNAPSHOT_HEADERS = {
     "Origin": "https://www.facebook.com",
     "Connection": "keep-alive",
     "Upgrade-Insecure-Requests": "1",
+
+    # CRITICAL — required for render_ad endpoint
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-origin",
+    "Sec-Fetch-User": "?1",
 }
 
 FBCDN_VIDEO_RE = re.compile(r"https://[^\"']+\.mp4[^\"']*")
