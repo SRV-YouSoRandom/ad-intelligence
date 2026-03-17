@@ -186,106 +186,59 @@ def _walk_json_for_media(data, depth=0) -> tuple[set[str], set[str]]:
 
 
 def _extract_media_candidates(html: str) -> tuple[str | None, str | None]:
-    """Exhaustive collection and ranking of all media candidates."""
-    all_videos = set()
-    all_images = set()
 
-    # 1. JSON blobs
-    bbox_matches = re.findall(r'__bbox\s*,\s*(\{.{100,55000}?\})\s*\)', html, re.DOTALL)
-    for blob in bbox_matches[:10]:
-        try:
-            data = json.loads(blob)
-            v, i = _walk_json_for_media(data)
-            all_videos.update(v)
-            all_images.update(i)
-        except (json.JSONDecodeError, RecursionError):
+    soup = BeautifulSoup(html, "html.parser")
+
+    video_url = None
+    image_url = None
+
+    # --- VIDEO ---
+    for video in soup.find_all("video"):
+
+        if video.get("src") and "fbcdn" in video["src"]:
+            video_url = video["src"]
+            break
+
+        for source in video.find_all("source"):
+            if source.get("src") and "fbcdn" in source["src"]:
+                video_url = source["src"]
+                break
+
+        if video_url:
+            break
+
+
+    # --- IMAGE ---
+    for img in soup.find_all("img"):
+
+        src = img.get("src")
+        if not src:
             continue
 
-    # Raw string scan for creative keys (fallback for malformed JSON)
-    raw_v = re.findall(r'"playable_url(?:_quality_hd)?"\s*:\s*"([^"]+)"', html)
-    all_videos.update([r.replace("\\/", "/").replace("\\u0025", "%") for r in raw_v])
-    raw_i = re.findall(r'"(image_url|original_image_url)"\s*:\s*"([^"]+)"', html)
-    all_images.update([r[1].replace("\\/", "/").replace("\\u0025", "%") for r in raw_i])
+        # Ignore profile icons
+        if "profile" in src or "s60x60" in src or "s40x40" in src:
+            continue
 
-    # 2. HTML Tags (with smart class-based filtering)
-    soup = BeautifulSoup(html, "html.parser")
-    
-    # Ad images have no xc26acl; profile images/icons are wrapped in it
-    for img_tag in soup.find_all("img"):
-        src = img_tag.get("src")
-        if not src: continue
-        
-        # Check parents for xc26acl (Meta's signature for profile assets)
-        is_profile = False
-        if img_tag.find_parent(class_="xc26acl"):
-            is_profile = True
-            
-        # Check alt text
-        alt = (img_tag.get("alt") or "").lower()
-        if alt and any(p in alt for p in ["profile", "logo", "avatar"]):
-            is_profile = True
-            
-        if is_profile:
-            # Add to images but we will penalize it later based on the URL pattern if needed
-            # Actually, let's just make it clear in the ranking
-            all_images.add(src) 
-        else:
-            all_images.add(src)
+        if "fbcdn" in src or "scontent" in src:
 
-    for v_tag in soup.find_all("video"):
-        src = v_tag.get("src") or v_tag.get("data-src")
-        if src: all_videos.add(src)
-        for source in v_tag.find_all("source"):
-            if source.get("src"): all_videos.add(source.get("src"))
-        poster = v_tag.get("poster")
-        if poster: all_images.add(poster)
+            # Ads library creative images contain t39.35426
+            if "t39.35426" in src or ".jpg" in src:
+                image_url = src
+                break
 
-    # 3. Meta Tags
-    for meta in soup.find_all("meta"):
-        prop = meta.get("property", "")
-        if prop and "og:video" in prop: all_videos.add(meta.get("content"))
-        if prop and "og:image" in prop: all_images.add(meta.get("content"))
 
-    # 4. Regex fallback
-    all_videos.update([r.replace("\\/", "/").replace("\\u0025", "%") for r in FBCDN_VIDEO_RE.findall(html)])
-    all_images.update([r.replace("\\/", "/").replace("\\u0025", "%") for r in FBCDN_IMAGE_RE.findall(html)])
+    # --- fallback regex ---
+    if not video_url:
+        m = re.search(r"https://[^\"']+\.mp4[^\"']*", html)
+        if m:
+            video_url = m.group(0)
 
-    # --- RANKING ---
-    best_video = None
-    if all_videos:
-        valid_v = [v for v in all_videos if v and ("fbcdn" in v or "scontent" in v)]
-        if valid_v:
-            scored_v = [(v, rank_url(v, True)) for v in valid_v]
-            scored_v.sort(key=lambda x: x[1], reverse=True)
-            best_video, best_v_score = scored_v[0]
-            
-            logger.debug(
-                "video_candidates_ranked",
-                top_score=best_v_score,
-                candidate_count=len(valid_v),
-                best_url_snippet=best_video[:60]
-            )
-            
-            if best_v_score < -10000: best_video = None
+    if not image_url:
+        m = re.search(r"https://[^\"']+\.jpg[^\"']*", html)
+        if m:
+            image_url = m.group(0)
 
-    best_image = None
-    if all_images:
-        valid_i = [i for i in all_images if i and ("fbcdn" in i or "scontent" in i)]
-        if valid_i:
-            scored_i = [(i, rank_url(i, False)) for i in valid_i]
-            scored_i.sort(key=lambda x: x[1], reverse=True)
-            best_image, best_i_score = scored_i[0]
-            
-            logger.debug(
-                "image_candidates_ranked",
-                top_score=best_i_score,
-                candidate_count=len(valid_i),
-                best_url_snippet=best_image[:60]
-            )
-            
-            if best_i_score < -10000: best_image = None
-
-    return best_image, best_video
+    return image_url, video_url
 
 
 async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str) -> dict | None:
@@ -403,6 +356,7 @@ async def fetch_media_from_snapshot(snapshot_url: str, ad_archive_id: str) -> di
                     timeout=45,
                     follow_redirects=True,
                     headers=SNAPSHOT_HEADERS,
+                    http2=True
                 ) as client:
 
                     response = await client.get(snapshot_url)
